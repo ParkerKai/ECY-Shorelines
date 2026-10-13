@@ -664,6 +664,7 @@ for gname, gs in group_series.items():
     fig, axes = plt.subplots(2, 1, figsize=(8, 8), sharex=True)
     ax_series, ax_difference = axes
     enso_values = []
+    enso_2026_values = None
 
     for k, yr in enumerate(enso_start_years):
         idx = pd.date_range(f"{yr}-03-01", f"{yr + 1}-03-01", freq="MS")
@@ -674,6 +675,8 @@ for gname, gs in group_series.items():
             continue
 
         enso_values.append(vals)
+        if yr == 2026:
+            enso_2026_values = vals
         color = colors[k % len(colors)]
         ax_series.plot(
             x,
@@ -713,17 +716,30 @@ for gname, gs in group_series.items():
         difference_range = np.vstack(
             (difference - difference_min, difference_max - difference)
         )
-        bar_colors = np.where(difference >= 0, "tab:red", "tab:blue")
         ax_difference.bar(
             x,
             difference,
             width=0.75,
-            color=bar_colors,
+            color="0.7",
             alpha=0.8,
             yerr=difference_range,
             capsize=4,
             error_kw={"ecolor": "0.2", "elinewidth": 1.2, "capthick": 1.2},
         )
+
+        if enso_2026_values is not None:
+            ax_difference.plot(
+                x,
+                enso_2026_values - seasonal_mean,
+                linestyle="None",
+                marker="o",
+                markersize=5,
+                color=colors[enso_start_years.index(2026) % len(colors)],
+                markeredgecolor="white",
+                markeredgewidth=0.8,
+                label="2026\u20132027",
+                zorder=3,
+            )
 
     ax_difference.axhline(0, color="0.2", lw=0.9)
     ax_difference.set_ylabel("El Ni\u00f1o mean \u2212 seasonal cycle (cm)")
@@ -733,6 +749,8 @@ for gname, gs in group_series.items():
     ax_difference.set_xticklabels(month_labels)
     ax_difference.set_xlim(x[0] - 0.5, x[-1] + 0.5)
     ax_difference.grid(axis="y", alpha=0.3)
+    if enso_2026_values is not None:
+        ax_difference.legend(frameon=False)
 
     fig.suptitle(f"El Ni\u00f1o comparison \u2014 {gname}")
     fig.tight_layout(rect=(0, 0, 1, 0.97))

@@ -1,0 +1,6 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "python.defaultInterpreterPath": "C:\\Users\\kaip461\\AppData\\Local\\miniforge3\\envs\\geoprocessing\\python.exe",
+    "python.envFile": "${workspaceFolder}/.env"
+}

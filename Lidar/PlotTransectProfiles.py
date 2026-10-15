@@ -21,17 +21,17 @@ import pandas as pd
 import pyarrow.parquet as pq
 from matplotlib.lines import Line2D
 
-REGION_NAME = "king"
+REGION_NAME = "grays_harbor"
 
-PROFILE_DIR = Path(r"D:\Data\Lidar_CoastalChange\county_change") / REGION_NAME
+PROFILE_DIR = Path(r"D:\Data\Lidar\county_change_outer") / REGION_NAME
 
 # Water planes detected by BuildWaterMaskIndex.py.
 WATER_MASK_GPKG = Path(r"D:\Data\Lidar\lidar_water_mask_dtm.gpkg")
 WATER_SCAN_LAYER = "water_scans"
 
 # Transect to plot, matching the id columns carried through from the transects.
-PATH_ID = 1
-SAMPLE_ID = 21848
+PATH_ID = 2
+SAMPLE_ID = 41251
 
 # None = show the figure interactively, otherwise a directory to save a PNG in.
 OUT_DIR = None

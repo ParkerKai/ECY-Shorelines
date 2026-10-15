@@ -46,18 +46,38 @@ WATER_TILE_LAYER = "water_tiles"
 APPLY_WATER_MASK = True
 
 REGION_LAYER = "barrier_region"
+
+# Select "county" for the standard county boundaries or "outer" for the
+# expanded coastal boundaries.
+MODE = "outer"
+
+
+
+MODE_CONFIGS = {
+    "PugetSound": {
+        "region_name": "clallam",
+        "region_root": Path(r"N:\SEA\Kai\Data\BarriersToMigration\counties_v4"),
+        "output_root": Path(r"D:\Data\Lidar\county_change"),
+        "max_pixels": 2_000_000_000,
+    },
+    "outer": {
+        "region_name": "pacific",
+        "region_root": Path(r"N:\SEA\Kai\Data\BarriersToMigration\counties_Outer"),
+        "output_root": Path(r"D:\Data\Lidar\county_change_outer"),
+        "max_pixels": 10_000_000_000,
+    },
+}
+
+if MODE not in MODE_CONFIGS:
+    raise SystemExit(f"Unknown MODE {MODE!r}; choose from {sorted(MODE_CONFIGS)}")
+
+MODE_CONFIG = MODE_CONFIGS[MODE]
 # Label used for output file names and the exported attributes.
-REGION_NAME = "grays_harbor"
-
-OUT_DIR = Path(r"D:\Data\Lidar\county_change")
-OUT_DIR = OUT_DIR / REGION_NAME
-
+REGION_NAME = MODE_CONFIG["region_name"]
+OUT_DIR = MODE_CONFIG["output_root"] / REGION_NAME
 
 # Polygon layer the analysis is trimmed to; all its features are dissolved.
-REGION_GPKG = Path(
-    r"N:\SEA\Kai\Data\BarriersToMigration\counties_v4"
-)
-REGION_GPKG  = REGION_GPKG / REGION_NAME / "county_data.gpkg"
+REGION_GPKG = MODE_CONFIG["region_root"] / REGION_NAME / "county_data.gpkg"
 
 
 # Grid the composites are built on. Metres, in the index CRS.
@@ -65,7 +85,7 @@ OUTPUT_CRS = "EPSG:26910"
 TARGET_RES = 1
 
 # Refuse to build grids larger than this; raise TARGET_RES for big counties.
-MAX_PIXELS = 2_000_000_000
+MAX_PIXELS = MODE_CONFIG["max_pixels"]
 
 # Elevation change smaller than this (metres) is treated as noise.
 ERROR_TOLERANCE = 0.5

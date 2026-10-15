@@ -32,21 +32,37 @@ APPLY_WATER_MASK = True
 # auditing the mask before trusting it.
 DROP_WATER = False
 
-REGION_NAME = "jefferson"
+# Select "county" for the standard county transects or "outer" for the
+# expanded coastal transects.
+MODE = "county"
+MODE_CONFIGS = {
+    "county": {
+        "region_name": "jefferson",
+        "transect_root": Path(
+            r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\Counties"
+        ),
+        "output_root": Path(r"D:\Data\Lidar\county_change"),
+    },
+    "outer": {
+        "region_name": "grays_harbor",
+        "transect_root": Path(r"N:\SEA\Kai\Data\BarriersToMigration\counties_Outer"),
+        "output_root": Path(r"D:\Data\Lidar\county_change_outer"),
+    },
+}
 
+if MODE not in MODE_CONFIGS:
+    raise SystemExit(f"Unknown MODE {MODE!r}; choose from {sorted(MODE_CONFIGS)}")
 
-TRANSECT_GPKG = Path(
-    r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\Counties"
-)
-TRANSECT_GPKG = TRANSECT_GPKG / REGION_NAME / "transects.gpkg"
+MODE_CONFIG = MODE_CONFIGS[MODE]
+REGION_NAME = MODE_CONFIG["region_name"]
+TRANSECT_GPKG = MODE_CONFIG["transect_root"] / REGION_NAME / "transects.gpkg"
 
 TRANSECT_LAYER = "transects_all"
 # Columns that uniquely identify a transect; carried through to the output.
 TRANSECT_ID_COLS = ["path_id", "sample_id"]
 
 
-OUT_DIR = Path(r"D:\Data\Lidar\county_change")
-OUT_DIR = OUT_DIR / REGION_NAME / 'profiles'
+OUT_DIR = MODE_CONFIG["output_root"] / REGION_NAME / "profiles"
 
 # Sample spacing along each transect, in transect CRS units (metres).
 SAMPLE_SPACING = 1.0

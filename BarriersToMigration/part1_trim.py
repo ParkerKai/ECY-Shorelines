@@ -57,9 +57,20 @@ def _buffer_distance_in_crs_units(
 def _read_layer_spec(name: str, spec: LayerSpec) -> gpd.GeoDataFrame:
     """Read one asset layer, honoring an optional layer name inside a GeoPackage."""
     logger.info("Reading asset layer '%s' from %s", name, spec.path)
-    if spec.layer:
-        return gpd.read_file(spec.path, layer=spec.layer)
-    return gpd.read_file(spec.path)
+    try:
+        if spec.layer:
+            return gpd.read_file(spec.path, layer=spec.layer)
+        return gpd.read_file(spec.path)
+    except Exception as exc:  # layer absent (e.g., no such assets in this county)
+        logger.warning(
+            "Asset layer '%s' could not be read (path=%s, layer=%s): %s. "
+            "Continuing with an empty layer.",
+            name,
+            spec.path,
+            spec.layer,
+            exc,
+        )
+        return gpd.GeoDataFrame(geometry=[], crs=f"EPSG:{COUNTY_CRS_EPSG}")
 
 
 def trim_and_export(

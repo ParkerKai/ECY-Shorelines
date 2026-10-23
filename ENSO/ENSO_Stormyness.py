@@ -164,20 +164,20 @@ def enso_violin_figure(per_station, label, units, fname):
     if detrend_for_comparison:
         per_station = detrend_by_year(per_station)
 
-    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-    group_labels = ["All years"] + [f"{y - 1}\u2013{y}" for y in enso_peak_years]
+    group_labels = ["Other years", "ENSO years"]
     palette = dict(
         zip(
-            group_labels,
-            ["0.75"] + [colors[k % len(colors)] for k in range(len(enso_peak_years))],
+            group_labels, ["0.75", plt.rcParams["axes.prop_cycle"].by_key()["color"][0]]
         )
     )
 
-    all_years = per_station.assign(group=group_labels[0])
-    events = per_station[per_station["enso_year"].isin(enso_peak_years)].assign(
-        group=lambda d: d["enso_year"].map(dict(zip(enso_peak_years, group_labels[1:])))
+    other_years = per_station[~per_station["enso_year"].isin(enso_peak_years)].assign(
+        group=group_labels[0]
     )
-    plot_df = pd.concat([all_years, events], ignore_index=True)
+    events = per_station[per_station["enso_year"].isin(enso_peak_years)].assign(
+        group=group_labels[1]
+    )
+    plot_df = pd.concat([other_years, events], ignore_index=True)
     plot_df["group"] = pd.Categorical(plot_df["group"], categories=group_labels)
 
     counties = sorted(per_station["county"].unique())
@@ -200,14 +200,12 @@ def enso_violin_figure(per_station, label, units, fname):
             palette=palette,
             legend=False,
             cut=0,
-            width=2,
+            width=0.8,
             density_norm="width",
             inner="quartile",
             linewidth=1.0,
             ax=ax,
         )
-        ax.set_xlim(-0.6, len(group_labels) - 0.4)
-
         baseline = sub.loc[sub["group"] == group_labels[0], "station_mean"]
         ax.axhline(float(baseline.median()), color="0.4", ls="--", lw=1.0, zorder=0)
 
@@ -231,11 +229,11 @@ def enso_violin_figure(per_station, label, units, fname):
         )
         ax.set_xlabel("")
         ax.set_ylabel("")
-        ax.tick_params(axis="x", labelsize=8, labelrotation=30)
-        for lbl in ax.get_xticklabels():
-            lbl.set_ha("right")
+        # Ticks sit at the violin centres (categorical positions 0, 1, ...).
+        ax.set_xticks(range(len(group_labels)), group_labels)
+        ax.tick_params(axis="x", labelsize=9)
         ax.grid(axis="y", alpha=0.3)
-        ax.set_xlim(-1, len(group_labels) + 1)
+        ax.set_xlim(-0.6, len(group_labels) - 0.4)
 
     for ax in axes[len(counties) :]:
         ax.set_visible(False)
@@ -243,7 +241,7 @@ def enso_violin_figure(per_station, label, units, fname):
     detrend_note = " (detrended)" if detrend_for_comparison else ""
     fig.supylabel(f"ENSO-year mean {label} ({units}){detrend_note}")
     fig.suptitle(
-        f"El Ni\u00f1o years vs. all years \u2014 {label} by county "
+        f"El Ni\u00f1o years vs. other years \u2014 {label} by county "
         "(ENSO year = Mar\u2192Feb; violins span stations)"
     )
     fig.tight_layout(rect=(0.02, 0, 1, 0.95))

@@ -52,7 +52,7 @@ from shapely.ops import unary_union, polygonize
 # ===============================================================================
 
 # Output directory
-dir_out = r"N:\SEA\Kai\Data\Assets"
+dir_out = r"N:\SEA\Kai\Data\Assets\OSM"
 
 # Target geography
 state_name = "Washington"

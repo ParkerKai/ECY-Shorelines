@@ -33,19 +33,18 @@ from part5_habitats import tag_habitat_intersections_and_export
 # ---------------------------
 # county = "jefferson"  # lower case
 county_list = [
-#    "clallam",
-#    "jefferson",
-#    "king",
-#    "kitsap",
-#    "mason",
-#    "pierce",
-#    "skagit",
-#    "snohomish",
-#    "thurston",
+    "clallam",
+    "jefferson",
+    "king",
+    "kitsap",
+    "mason",
+    "pierce",
+    "skagit",
+    "snohomish",
+    "thurston",
     "whatcom",
     "island",
-    "san_juan"
-    
+    "san_juan",
 ]
 
 
@@ -63,6 +62,8 @@ cfg = BarrierConfig(
     max_search_m=150.0,
     snap_tolerance_m=1.0,
     buffer_distance_m=150.0,
+    behind_barrier_search_m=6.0,
+    behind_barrier_layers=("roads", "rail", "rail_ecopia", "buildings"),
     orientation_smooth_m=30.0,
     max_turn_deg=25.0,
     elev_probe_dists_m=(10, 30, 60),

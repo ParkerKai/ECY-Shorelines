@@ -19,14 +19,20 @@ elevation:
      falls in a plausible tidal band.
   3. Histogram those flat low elevations. Water contributes one dominant spike;
      its location is the water plane.
-  4. Mask everything at or below that plane plus a tolerance, sieve out specks,
-     polygonize, and buffer outward.
+  4. Measure the scan's water-surface noise at mask resolution inside the
+     reference core, and set the tolerance above the plane from it.
+  5. Mask everything at or below that plane plus the tolerance, close small
+     dry pits and gaps without moving the mask's outer edge, sieve out specks,
+     and polygonize.
+  6. Keep only mask regions connected, across the whole scan, to the core, so
+     low ground that is merely below the plane is not taken for water.
 
 A reference layer of visible surface water sharpens every one of those steps.
 Because it does not register exactly against the lidar shoreline it is never
 used as a hard boundary; instead it is eroded inward to an always-wet core and
 dilated outward to a permissive limit. The core seeds the histogram, so a broad
 but genuinely flat tidal flat can no longer be mistaken for the water plane,
+supplies the noise sample for the tolerance, anchors the connectivity test,
 and is masked unconditionally in every scan. The limit bounds where detection
 is allowed to mask at all, keeping low-lying inland ground out of it.
 
@@ -35,7 +41,7 @@ over-masked rather than silently passed through. WATER_Z_OVERRIDES lets a known
 water level be forced in for any scan.
 
 Output GeoPackage layers:
-  water_tiles - one buffered water polygon per tile, for windowed raster lookup
+  water_tiles - one water polygon per tile, for windowed raster lookup
   water_scans - the dissolved water mask per scan, plus the detection stats
 """
 
@@ -50,6 +56,7 @@ import shapely
 from pyproj import CRS
 from rasterio import features
 from rasterio.enums import Resampling
+from scipy import ndimage
 from shapely.geometry import box, shape
 from shapely.ops import unary_union
 
@@ -75,7 +82,8 @@ REFERENCE_WATER = Path(r"D:\Data\GIS_general\VisibleSurfaceWater_OpenWater.shp")
 SEED_EROSION_M = 30.0
 # Dilated outward to bound where masking may happen. Generous, so a
 # registration offset can never exclude real water.
-LIMIT_DILATION_M = 150.0
+LIMIT_DILATION_M = 150.
+
 # Draw the histogram only from the core, rather than from every flat low cell.
 SEED_HISTOGRAM = True
 # Refuse to mask anything outside the dilated limit.
@@ -93,13 +101,15 @@ BUFFER_QUAD_SEGS = 2
 # Elevations are metres NAVD88 throughout.
 # Band searched for the water plane. Must bracket the local tidal range but
 # stay below anything that could be real upland terrain.
-SEARCH_RANGE = (-4.0, 5.0)
+SEARCH_RANGE = (-2.0, 4.0)
+
 # Gradient magnitude (rise/run) below which an averaged cell counts as flat.
 FLAT_SLOPE = 0.02
 # Grid the water-plane histogram is built on. Coarse enough to average out
 # speckle, fine enough that the beach face still registers as sloped.
 HIST_RES_M = 10.0
 HIST_BIN_M = 0.05
+
 # Half-width of the window around the peak bin used to refine the estimate.
 PEAK_WINDOW_M = 0.25
 # Share of the flat low-lying cells that must fall within PEAK_WINDOW_M of the
@@ -109,29 +119,51 @@ PEAK_WINDOW_M = 0.25
 # so has no water surface) scores 0.08.
 MIN_PEAK_FRACTION = 0.15
 MIN_PEAK_CELLS = 200
+
 # Reject a pool with more than this share of its mass against either end of
 # SEARCH_RANGE: the distribution is truncated, so its mode means nothing. A
 # correct reference keeps this near zero; it firing means something is wrong.
 MAX_EDGE_FRACTION = 0.25
 EDGE_GUARD_M = 0.10
+
 # Cap on tiles read for the histogram; scans with more are strided.
 MAX_HIST_TILES = 400
 # Reject a detected plane above this; a higher peak is more likely a tidal flat.
 # Must sit above local MHHW, which is about 3.4 m NAVD88 in Puget Sound.
 MAX_WATER_Z = 4.0
+
 # Used when detection fails or is rejected. Set near the local low-water datum.
 FALLBACK_WATER_Z = 0.0
 
 # Raised above the water plane before masking, to catch wave crests and the
-# swash edge. Larger values over-mask.
-Z_TOLERANCE = 0.25
+# swash edge. Larger values over-mask. Used as-is when ADAPTIVE_TOLERANCE is off
+# or the noise cannot be measured (fallback level, no reference, too few cells).
+Z_TOLERANCE = 0.1
+# Measure the tolerance per scan instead: the median offset of MASK_RES_M core
+# cells from the plane plus TOLERANCE_SIGMAS robust standard deviations
+# (1.4826 * MAD), clamped to TOLERANCE_RANGE. Calm scans get a tight cut and
+# choppy ones a looser one.
+ADAPTIVE_TOLERANCE = True
+TOLERANCE_SIGMAS = 2.0
+TOLERANCE_RANGE = (0.05, 0.5)
+# Core cells further than this from the plane are piers, boats or misregistered
+# land rather than water, and are left out of the noise estimate.
+TOLERANCE_OUTLIER_M = 1.0
+# Cap on core tiles read at MASK_RES_M for the estimate, and the samples needed.
+MAX_TOLERANCE_TILES = 40
+MIN_TOLERANCE_CELLS = 1000
+
 # Grid the mask itself is rasterized on, before polygonizing.
 MASK_RES_M = 1.0
+# Morphological closing radius. Fills dry pits (wave crests above the cut,
+# dropouts) and gaps narrower than twice this without moving the outer edge of
+# the mask, so it does not eat into the beach the way an outward buffer does.
+CLOSING_M = 5.0
 # Connected mask regions smaller than this many cells are dropped as noise.
 MIN_MASK_PIXELS = 50
-# Outward buffer on the final polygons. Also closes speckle dropouts and gaps
-# narrower than twice this distance, so no separate hole filling is needed.
-BUFFER_M = 10.0
+# Keep only mask regions connected, across tile seams, to the reference core.
+# Drops isolated low ground (backshore hollows, ponds) that sits below the plane.
+REQUIRE_CORE_CONNECTION = True
 
 # Undeclared nodata sentinels such as -9999 or -3.4e38.
 VALID_Z_RANGE = (-200.0, 5000.0)
@@ -282,19 +314,16 @@ def read_grid(src, target_res_m):
     return z, transform, native_res * factor
 
 
-def flat_low_samples(z, res_m, restrict=None):
-    """Elevations of cells that are both near-flat and within SEARCH_RANGE."""
+def flat_low_mask(z, res_m):
+    """Cells that are both near-flat and within SEARCH_RANGE."""
     if z.shape[0] < 3 or z.shape[1] < 3 or not res_m:
-        return np.empty(0, dtype="float32")
+        return np.zeros(z.shape, dtype=bool)
 
     dy, dx = np.gradient(z)
     with np.errstate(invalid="ignore"):
         slope = np.hypot(dx, dy) / res_m
         low, high = SEARCH_RANGE
-        keep = np.isfinite(z) & (z >= low) & (z <= high) & (slope <= FLAT_SLOPE)
-    if restrict is not None:
-        keep &= restrict
-    return z[keep]
+        return np.isfinite(z) & (z >= low) & (z <= high) & (slope <= FLAT_SLOPE)
 
 
 def peak_estimate(pool):
@@ -349,13 +378,13 @@ def water_plane(scan_name, paths, reference):
             print(f"    unreadable, skipped: {Path(path).name} ({exc})")
             continue
 
-        chunk = flat_low_samples(z, res_m)
-        if chunk.size:
-            every.append(chunk)
-        if core is not None and core.any():
-            chunk = flat_low_samples(z, res_m, core)
-            if chunk.size:
-                seeded.append(chunk)
+        keep = flat_low_mask(z, res_m)
+        if keep.any():
+            every.append(z[keep])
+        if core is not None:
+            keep &= core
+            if keep.any():
+                seeded.append(z[keep])
 
     seeded_pool = np.concatenate(seeded) if seeded else np.empty(0, dtype="float32")
     every_pool = np.concatenate(every) if every else np.empty(0, dtype="float32")
@@ -391,11 +420,62 @@ def water_plane(scan_name, paths, reference):
     return water_z, f"detected:{source}", stats
 
 
-def tile_water_polygons(src, water_z, reference):
-    """Buffered polygons covering this tile's water returns, in its native CRS."""
-    z, transform, _ = read_grid(src, MASK_RES_M)
+def water_tolerance(paths, water_z, reference):
+    """Height above the plane to mask for one scan, plus the cells it rests on.
+
+    Measured on the same MASK_RES_M grid the mask uses, inside the core where
+    every valid cell should be water, so it reflects the wave and sensor noise
+    the cut actually has to absorb.
+    """
+    if not ADAPTIVE_TOLERANCE or reference is None:
+        return Z_TOLERANCE, 0
+
+    step = max(1, len(paths) // MAX_TOLERANCE_TILES)
+    samples = []
+    for path in paths[::step]:
+        try:
+            with rasterio.open(path) as src:
+                if src.crs is None:
+                    continue
+                z, transform, _ = read_grid(src, MASK_RES_M)
+                core = reference.mask("core", src.crs, transform, z.shape)
+        except (rasterio.errors.RasterioError, OSError) as exc:
+            print(f"    unreadable, skipped: {Path(path).name} ({exc})")
+            continue
+        offset = z[core] - water_z
+        offset = offset[np.isfinite(offset) & (np.abs(offset) <= TOLERANCE_OUTLIER_M)]
+        if offset.size:
+            samples.append(offset)
+
+    offset = np.concatenate(samples) if samples else np.empty(0, dtype="float32")
+    if offset.size < MIN_TOLERANCE_CELLS:
+        return Z_TOLERANCE, int(offset.size)
+
+    centre = float(np.median(offset))
+    sigma = 1.4826 * float(np.median(np.abs(offset - centre)))
+    tolerance = float(np.clip(centre + TOLERANCE_SIGMAS * sigma, *TOLERANCE_RANGE))
+    return tolerance, int(offset.size)
+
+
+def close_mask(wet, res_m):
+    """Morphological closing with a CLOSING_M disk, safe at the tile edge."""
+    radius = int(round(CLOSING_M / res_m)) if res_m else 0
+    if radius < 1:
+        return wet
+    y, x = np.ogrid[-radius : radius + 1, -radius : radius + 1]
+    disk = x * x + y * y <= radius * radius
+    # Edge padding keeps the erosion half of the closing from treating the
+    # outside of the tile as dry and shaving the mask back from the border.
+    padded = np.pad(wet, radius, mode="edge")
+    closed = ndimage.binary_closing(padded, structure=disk)
+    return closed[radius:-radius, radius:-radius]
+
+
+def tile_water_polygons(src, water_z, tolerance, reference):
+    """Polygon covering this tile's water returns in its native CRS, or None."""
+    z, transform, res_m = read_grid(src, MASK_RES_M)
     with np.errstate(invalid="ignore"):
-        wet = np.isfinite(z) & (z <= water_z + Z_TOLERANCE)
+        wet = np.isfinite(z) & (z <= water_z + tolerance)
 
     if reference is not None:
         if CONFINE_TO_REFERENCE:
@@ -404,8 +484,9 @@ def tile_water_polygons(src, water_z, reference):
             wet |= reference.mask("core", src.crs, transform, z.shape)
 
     if not wet.any():
-        return []
+        return None
 
+    wet = close_mask(wet, res_m)
     cleaned = features.sieve(wet.astype("uint8"), size=MIN_MASK_PIXELS)
     geoms = [
         shape(geom)
@@ -414,15 +495,30 @@ def tile_water_polygons(src, water_z, reference):
         )
         if value
     ]
-    if not geoms:
-        return []
-
-    # Buffering in native units, so convert the metre distance if needed.
-    distance = BUFFER_M / linear_unit(src.crs)
-    return [unary_union(geoms).buffer(distance, quad_segs=BUFFER_QUAD_SEGS)]
+    return unary_union(geoms) if geoms else None
 
 
-def mask_scan(scan_name, group, water_z, index_crs, reference):
+def keep_core_connected(masked, reference):
+    """Drop tile polygon parts not connected, across tile seams, to the core."""
+    rows = masked.assign(_row=np.arange(len(masked))).explode(ignore_index=True)
+    parts = rows.geometry.values
+    # Adjacent tiles' grids need not line up exactly, so bridge seams by a cell
+    # when forming connected regions. The bridge is only used for the test.
+    bridge = MASK_RES_M / linear_unit(masked.crs)
+    regions = shapely.get_parts(
+        shapely.union_all(shapely.buffer(parts, bridge, quad_segs=1))
+    )
+    regions = regions[reference.intersecting("core", regions)]
+    if regions.size == 0:
+        return masked.iloc[:0]
+
+    hits = shapely.STRtree(regions).query(parts, predicate="intersects")
+    rows = rows.iloc[np.unique(hits[0])]
+    kept = rows.dissolve(by="_row", aggfunc="first", sort=True)
+    return kept.reset_index(drop=True)[masked.columns]
+
+
+def mask_scan(scan_name, group, water_z, tolerance, index_crs, reference):
     """Water polygons for every tile in a scan, reprojected to the index CRS."""
     by_crs = {}
     for name, path in zip(group["name"], group["path"]):
@@ -430,24 +526,24 @@ def mask_scan(scan_name, group, water_z, index_crs, reference):
             with rasterio.open(path) as src:
                 if src.crs is None:
                     continue
-                geoms = tile_water_polygons(src, water_z, reference)
+                geom = tile_water_polygons(src, water_z, tolerance, reference)
                 crs = src.crs
         except (rasterio.errors.RasterioError, OSError) as exc:
             print(f"    unreadable, skipped: {Path(path).name} ({exc})")
             continue
 
-        for geom in geoms:
-            if geom.is_empty:
-                continue
-            by_crs.setdefault(crs, []).append(
-                {
-                    "scan": scan_name,
-                    "name": name,
-                    "path": path,
-                    "water_z": water_z,
-                    "geometry": geom,
-                }
-            )
+        if geom is None or geom.is_empty:
+            continue
+        by_crs.setdefault(crs, []).append(
+            {
+                "scan": scan_name,
+                "name": name,
+                "path": path,
+                "water_z": water_z,
+                "z_tolerance": tolerance,
+                "geometry": geom,
+            }
+        )
 
     frames = [
         gpd.GeoDataFrame(records, geometry="geometry", crs=crs).to_crs(index_crs)
@@ -455,9 +551,15 @@ def mask_scan(scan_name, group, water_z, index_crs, reference):
     ]
     if not frames:
         return None
-    return gpd.GeoDataFrame(
+    masked = gpd.GeoDataFrame(
         pd.concat(frames, ignore_index=True), geometry="geometry", crs=index_crs
     )
+    if reference is not None and REQUIRE_CORE_CONNECTION:
+        before = masked.geometry.area.sum()
+        masked = keep_core_connected(masked, reference)
+        dropped = before - masked.geometry.area.sum()
+        print(f"    dropped {dropped / 1e6:.3f} km2 not connected to the core")
+    return masked
 
 
 def main():
@@ -504,7 +606,16 @@ def main():
         detail = ", ".join(f"{k}={v:.3g}" for k, v in stats.items())
         print(f"    water plane {water_z:.2f} m NAVD88 [{method}] {detail}")
 
-        masked = mask_scan(scan_name, group, water_z, index_crs, reference)
+        # A fallback plane is a guess, so the core's spread around it means nothing.
+        if method.startswith("fallback"):
+            tolerance, tol_cells = Z_TOLERANCE, 0
+        else:
+            tolerance, tol_cells = water_tolerance(paths, water_z, reference)
+        print(f"    tolerance {tolerance:.3f} m from {tol_cells} core cells")
+
+        masked = mask_scan(
+            scan_name, group, water_z, tolerance, index_crs, reference
+        )
         if masked is None or masked.empty:
             print("    no water returns found")
             continue
@@ -516,6 +627,8 @@ def main():
                 "scan": scan_name,
                 "year": group["year"].iloc[0] if "year" in group else None,
                 "water_z": water_z,
+                "z_tolerance": tolerance,
+                "tolerance_cells": tol_cells,
                 "method": method,
                 "peak_fraction": stats.get("fraction"),
                 "sample_cells": stats.get("cells"),

@@ -64,6 +64,15 @@ class BarrierConfig:
     min_hit_distance_m: float = 0.0
     segment_fixed_onshore: bool = True
     buffer_distance_m: float = 150.0
+    # "Behind barrier" check: after the first hit, look this far further along the
+    # transect for any of these asset layers (keys of the asset layer mapping).
+    behind_barrier_search_m: float = 6.0
+    behind_barrier_layers: tuple[str, ...] = (
+        "roads",
+        "rail",
+        "rail_ecopia",
+        "buildings",
+    )
     # Orientation smoothing
     orientation_smooth_m: float = 40.0
     eps_for_tangent_m: float = 1.0
@@ -111,6 +120,8 @@ class BarrierConfig:
             raise ValueError(f"These distances must be > 0: {', '.join(invalid)}")
         if self.snap_tolerance_m < 0 or self.buffer_distance_m < 0:
             raise ValueError("snap_tolerance_m and buffer_distance_m must be >= 0")
+        if self.behind_barrier_search_m < 0:
+            raise ValueError("behind_barrier_search_m must be >= 0")
         if not self.elev_probe_dists_m or any(d <= 0 for d in self.elev_probe_dists_m):
             raise ValueError("elev_probe_dists_m must contain only positive distances")
         if not self.water_probe_dists_m or any(

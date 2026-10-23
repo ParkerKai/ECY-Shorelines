@@ -4,11 +4,13 @@ import os
 
 import geopandas as gpd
 import numpy as np
+from shapely import STRtree
 from shapely.geometry import LineString, Point
-from shapely.ops import nearest_points
+from shapely.ops import nearest_points, substring
 
 from config import BarrierConfig, LayerSpec, normalize_asset_specs
 from helpers import (
+    _decompose_to_points,
     _dedup_geoms_by_wkb,
     _detect_origin_barrier_hit,
     build_asset_tree,
@@ -34,6 +36,60 @@ def _transect_origin_and_landward(row) -> tuple[Point, LineString]:
     return Point(ox, oy), LineString([(ox, oy), coords[-1][:2]])
 
 
+def _build_behind_barrier_trees(
+    county_layers: dict[str, gpd.GeoDataFrame], config: BarrierConfig
+) -> dict[str, STRtree]:
+    """One STRtree per "behind barrier" layer using full geometries (polygons stay filled)."""
+    trees: dict[str, STRtree] = {}
+    for name in config.behind_barrier_layers:
+        gdf = county_layers.get(name)
+        if gdf is None or gdf.empty:
+            continue
+        geoms = [
+            g
+            for g in gdf.to_crs(config.target_crs).geometry
+            if g is not None and not g.is_empty
+        ]
+        if geoms:
+            trees[name] = STRtree(geoms)
+    return trees
+
+
+def _feature_behind_barrier(
+    tran: LineString,
+    hit_dist_m: float,
+    trees: dict[str, STRtree],
+    search_m: float,
+    eps_m: float = 0.01,
+) -> str | None:
+    """Return the layer name of the nearest feature found along `tran` within
+    (hit_dist_m, hit_dist_m + search_m], or None.
+
+    Features whose contact with the search segment starts at the hit point
+    itself (i.e. the barrier that was hit) are ignored.
+    """
+    if not trees or search_m <= 0:
+        return None
+    end_m = min(hit_dist_m + search_m, tran.length)
+    if end_m - hit_dist_m <= eps_m:
+        return None
+    seg = substring(tran, hit_dist_m, end_m)
+
+    best_name, best_d = None, None
+    for name, tree in trees.items():
+        for g in query_tree_geoms(tree, seg):
+            inter = seg.intersection(g)
+            pts = _decompose_to_points(inter)
+            if not pts:
+                continue
+            d = min(seg.project(p) for p in pts)
+            if d <= eps_m:
+                continue
+            if best_d is None or d < best_d:
+                best_name, best_d = name, d
+    return best_name
+
+
 def find_barriers_and_export(
     county_layers: dict[str, gpd.GeoDataFrame],
     transect_layers: dict[str, gpd.GeoDataFrame],
@@ -47,7 +103,9 @@ def find_barriers_and_export(
     - For each transect, find first intersection with any barrier layer supplied
       via `asset_layers` (line layers directly, polygon layers via their exteriors).
     - Emit:
-        * barrier_hits (POINTS)
+        * barrier_hits (POINTS); `behind_barrier` names the nearest road/rail/
+          building layer found within `config.behind_barrier_search_m` landward
+          of the hit along the transect (None if nothing found)
         * shoreline_barrier_distance_lines (short segments along shoreline between bases, with mean hit dists)
         * transects_hits (origin->hit lines)
         * transects_all (re-export for convenience / QA)
@@ -99,6 +157,14 @@ def find_barriers_and_export(
     )
     tree_shoreline, shoreline_map = build_strtree_from_lines(
         shoreline_paths_gdf, config.target_crs, "shoreline"
+    )
+
+    behind_trees = _build_behind_barrier_trees(county_layers, config)
+    logger.info(
+        "%s: behind-barrier search (%.1f m) using layer(s): %s",
+        county_name,
+        config.behind_barrier_search_m,
+        ", ".join(behind_trees) or "none",
     )
 
     # WKB keyed lookup to recover (asset_type, asset_id) for explicit origin hits
@@ -219,6 +285,13 @@ def find_barriers_and_export(
 
             barrier_hit_flags[idx] = True
 
+            behind = _feature_behind_barrier(
+                tran,
+                float(dist_m),
+                behind_trees,
+                config.behind_barrier_search_m,
+            )
+
             barrier_hits_records.append(
                 {
                     "path_id": row["path_id"],
@@ -226,6 +299,7 @@ def find_barriers_and_export(
                     "asset_type": src_label,
                     "asset_id": src_idx,
                     "dist_m": float(dist_m),
+                    "behind_barrier": behind,
                     "geometry": hit_point_geom,
                 }
             )
@@ -247,6 +321,7 @@ def find_barriers_and_export(
         "asset_type",
         "asset_id",
         "dist_m",
+        "behind_barrier",
         "geometry",
     ]
     transect_hit_columns = [

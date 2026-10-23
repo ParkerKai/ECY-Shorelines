@@ -35,9 +35,9 @@ from part5_habitats import tag_habitat_intersections_and_export
 county_list = [
 #    "clallam",
 #    "jefferson",
-    "grays_harbor",
-    "kitsap",
-    "pacific",
+   # "grays_harbor",
+   # "kitsap",
+   # "pacific",
     "wahkiakum",
 ]
 

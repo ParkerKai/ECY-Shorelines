@@ -17,12 +17,25 @@ VYPER_GRIDS_DIR = Path(r"D:\Data\VLM\vyper_grids")
 os.environ["VYPER_GRIDS"] = str(VYPER_GRIDS_DIR)
 os.environ["PROJ_DATA"] = str(VYPER_GRIDS_DIR)
 
-# vyperdatum must be imported before pyproj so its proj.db/grids are registered.
+import pyproj
+
+# Pin PROJ to the vyper grids alone. pyproj caches its data dir on first use, so
+# PROJ_DATA is ignored if pyproj was already loaded in this kernel, and
+# vyperdatum only prepends its dir to the env default. If the vyper proj.db then
+# cannot be opened, PROJ silently falls back to the env proj.db, which has no
+# NOAA authority, and vyperdatum fails its import with an unhelpful assertion.
+pyproj.datadir.set_data_dir(str(VYPER_GRIDS_DIR))
+if "NOAA" not in pyproj.database.get_authorities():
+    raise RuntimeError(
+        f"PROJ could not load the NOAA authority from {VYPER_GRIDS_DIR / 'proj.db'}. "
+        "Check the file exists, is readable and not locked by another process, "
+        "then restart the kernel."
+    )
+
 from vyperdatum.transformer import Transformer
 
 import geopandas as gpd
 import numpy as np
-import pyproj
 from pyproj import Transformer as PyprojTransformer
 from pyproj.database import query_crs_info
 from pyproj.enums import PJType
@@ -45,7 +58,7 @@ METHOD_COL = "tidal_fill_method"
 DIST_COL = "tidal_fill_dist_m"
 QAQC_COL = "tidal_qaqc"
 
-COUNTY = "jefferson"
+COUNTY = "thurston"
 
 # NAD83(2011) geographic; datum elevations are reported relative to NAVD88.
 GEOG_CRS = "EPSG:6318"

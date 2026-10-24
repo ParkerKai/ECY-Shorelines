@@ -49,13 +49,12 @@ REGION_LAYER = "barrier_region"
 
 # Select "county" for the standard county boundaries or "outer" for the
 # expanded coastal boundaries.
-MODE = "outer"
-
+MODE = "PugetSound"
 
 
 MODE_CONFIGS = {
     "PugetSound": {
-        "region_name": "clallam",
+        "region_name": "thurston",
         "region_root": Path(r"N:\SEA\Kai\Data\BarriersToMigration\counties_v4"),
         "output_root": Path(r"D:\Data\Lidar\county_change"),
         "max_pixels": 2_000_000_000,

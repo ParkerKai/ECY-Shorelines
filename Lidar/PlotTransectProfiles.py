@@ -19,7 +19,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-import seaborn as sns
 from matplotlib.lines import Line2D
 
 from BuildWaterMaskIndex import (
@@ -30,7 +29,7 @@ from BuildWaterMaskIndex import (
     Z_TOLERANCE,
 )
 
-REGION_NAME = "king"
+REGION_NAME = "thurston"
 
 PROFILE_DIR = Path(r"D:\Data\Lidar\county_change") / REGION_NAME / "profiles"
 
@@ -47,7 +46,7 @@ TIDAL_DATUM_LAYER = "transect_bases_tidal_datums"
 
 # Transect to plot, matching the id columns carried through from the transects.
 PATH_ID = 0
-SAMPLE_ID = 100
+SAMPLE_ID = 9466
 
 # None = show the figure interactively, otherwise a directory to save a PNG in.
 OUT_DIR = None
@@ -59,6 +58,8 @@ CAUSE_MARKERS = {"reference core": "x", "closing": "^", "fill/other": "s"}
 
 # Datum whose contour position is tracked through time: "MLLW", "LMSL" or "MHHW".
 CROSSING_DATUM = "MHHW"
+POINT_SIGMA_Z_M = 0.20 / 1.96  # 1-sigma vertical lidar uncertainty (20 cm is the 95% CI)
+SLOPE_WINDOW_M = 2.0  # half-width of the window used for the local beach slope at a crossing
 
 # Trailing 4-digit year in the scan folder name, used for ordering and colour.
 YEAR_PATTERN = re.compile(r"(\d{4})")
@@ -199,6 +200,14 @@ def seaward_crossing(dist, z, wet, level):
     return dist[i] + t * (dist[i + 1] - dist[i])
 
 
+def local_slope(dist, z, wet, x0, window):
+    """Dry beach slope (m/m) by least squares within +/- window m of x0."""
+    ok = ~wet & np.isfinite(z) & (np.abs(dist - x0) <= window)
+    if ok.sum() < 3:
+        return np.nan
+    return np.polyfit(dist[ok], z[ok], 1)[0]
+
+
 #################### Main ######################
 
 
@@ -314,7 +323,7 @@ ax.set_ylabel("Elevation (m NAVD88)")
 ax.set_title(f"Transect path_id={PATH_ID}, sample_id={SAMPLE_ID}")
 ax.grid(alpha=0.3)
 ax.legend(handles, labels, fontsize=7, loc="best", framealpha=0.9)
-ax.set_xlim(100, 200)
+ax.set_xlim(0, 200)
 
 fig.tight_layout()
 
@@ -332,30 +341,96 @@ if datums is not None:
             p["dist_m"].to_numpy(), p["z"].to_numpy(), p["water"].to_numpy(), level
         )
         if np.isfinite(x):
-            rows.append({"scan": scan, "year": year + 0.5, "dist_m": x})
+            beach_slope = local_slope(
+                p["dist_m"].to_numpy(float),
+                p["z"].to_numpy(float),
+                p["water"].to_numpy(bool),
+                x,
+                SLOPE_WINDOW_M,
+            )
+            rows.append(
+                {
+                    "scan": scan,
+                    "year": year + 0.5,
+                    "dist_m": x,
+                    "beach_slope": beach_slope,
+                    "sigma_x_m": POINT_SIGMA_Z_M / abs(beach_slope)
+                    if np.isfinite(beach_slope) and beach_slope != 0
+                    else np.nan,
+                }
+            )
     crossings = pd.DataFrame(rows)
     print(f"\n{CROSSING_DATUM} ({level:+.2f} m) crossings:")
     print(crossings.to_string(index=False) if not crossings.empty else "  none")
 
+    if len(crossings) >= 2 and crossings["sigma_x_m"].isna().any():
+        print("Dropping crossings without a usable local beach slope")
+        crossings = crossings.dropna(subset=["sigma_x_m"])
+
     if len(crossings) >= 2:
-        slope, _ = np.polyfit(crossings["year"], crossings["dist_m"], 1)
+        from scipy import stats
+
+        x = crossings["year"].to_numpy(float)
+        y = crossings["dist_m"].to_numpy(float)
+        sig = crossings["sigma_x_m"].to_numpy(float)
+        n = len(x)
+        w = 1 / sig**2
+
+        # Weighted fit; each point's horizontal sigma = vertical sigma / beach slope.
+        # The variance is scaled by reduced chi-square (when > 1) so scatter beyond
+        # the propagated measurement error also widens the interval.
+        slope, intercept = np.polyfit(x, y, 1, w=np.sqrt(w))
+        xw = np.sum(w * x) / np.sum(w)
+        sxx = np.sum(w * (x - xw) ** 2)
+        dof = n - 2
+        chi2_red = np.sum(w * (y - (slope * x + intercept)) ** 2) / dof if dof > 0 else 1.0
+        scale = max(1.0, chi2_red)
+        slope_se = np.sqrt(scale / sxx)
+        tcrit = stats.t.ppf(0.975, dof) if dof > 0 else 1.96
+        slope_ci = tcrit * slope_se
+
+        xs = np.linspace(x.min(), x.max(), 100)
+        band_se = np.sqrt(scale * (1 / np.sum(w) + (xs - xw) ** 2 / sxx))
+
         fig2, ax2 = plt.subplots(figsize=(8, 6))
-        sns.regplot(data=crossings, x="year", y="dist_m", ax=ax2)
+        ax2.fill_between(
+            xs,
+            slope * xs + intercept - tcrit * band_se,
+            slope * xs + intercept + tcrit * band_se,
+            alpha=0.2,
+            color="C0",
+            label="95% CI of trend",
+        )
+        ax2.plot(xs, slope * xs + intercept, color="C0")
+        ax2.errorbar(
+            x,
+            y,
+            yerr=1.96 * sig,
+            fmt="o",
+            color="C0",
+            capsize=3,
+            label="Crossing (95% CI from vertical error)",
+        )
+        change = "Erosion" if slope > 0 else "Accretion"
         ax2.text(
             0.02,
             0.97,
-            f"slope = {slope * 1000:+.1f} mm/yr  (n={len(crossings)})",
+            f"Shoreline Change = {abs(slope) * 100:.0f} ± {slope_ci * 100:.0f} cm/yr "
+            f"{change}\n(95% CI, n={n})",
             transform=ax2.transAxes,
             va="top",
             bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "0.7"},
         )
         ax2.set_xlabel("Scan year")
+        ax2.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax2.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}"))
         ax2.set_ylabel(f"Distance along transect of {CROSSING_DATUM} (m)")
         ax2.set_title(
             f"{CROSSING_DATUM} ({level:+.2f} m NAVD88) position, "
             f"path_id={PATH_ID}, sample_id={SAMPLE_ID}"
         )
         ax2.grid(alpha=0.3)
+        ax2.legend(loc="lower right")
         fig2.tight_layout()
     else:
         print("Fewer than 2 crossings, skipping regression plot")

@@ -108,7 +108,11 @@ def safe_write_gpkg(gdf, path, layer, mode=None, engine="pyogrio"):
     Robust writer for GPKG:
     - Ensures parent directory exists
     - Clears read-only attribute if present
-    - Uses 'w' on first write, 'a' thereafter (unless overridden)
+    - mode='w' starts a fresh GeoPackage (any existing file is deleted);
+      mode='a' adds a layer to the file written earlier in the same step.
+      With pyogrio, 'w' alone would replace only `layer` and leave stale layers
+      from older runs, which later 'a' writes would append rows to.
+    - Defaults to 'w' on first write, 'a' thereafter.
     """
     if gdf is None or gdf.empty:
         # Still create an empty layer if you want; otherwise just return early
@@ -132,6 +136,9 @@ def safe_write_gpkg(gdf, path, layer, mode=None, engine="pyogrio"):
             raise PermissionError(
                 f"{path} is not writable; clear read-only and close in other apps."
             ) from e
+
+    if mode == "w":
+        ensure_gpkg_writable(path)
 
     # 4) Write
     gdf.to_file(path, layer=layer, driver="GPKG", mode=mode, engine=engine)
@@ -182,6 +189,24 @@ def ensure_gpkg_writable(path: str):
             raise RuntimeError(
                 f"Unable to remove existing GeoPackage or sidecar '{p}': {e}"
             ) from e
+
+
+def layer_spec_exists(path: str, layer: str | None = None) -> bool:
+    """True if `path` exists and, when `layer` is given, the source contains it.
+
+    Works for single-layer files (shapefile) and multi-layer containers such as
+    a GeoPackage or an Esri File Geodatabase (`.gdb` folder).
+    """
+    if not path or not os.path.exists(path):
+        return False
+    if not layer:
+        return True
+    try:
+        names = gpd.list_layers(path)["name"].astype(str)
+    except Exception:
+        logger.exception("Could not list layers in %s", path)
+        return False
+    return layer in set(names)
 
 
 # ---------------------------

@@ -20,7 +20,18 @@ class LayerSpec:
     barrier: bool = True  # used as a barrier in Part 3
     landward: bool = True  # used for landward-side voting in Part 2
     landward_weight: float = 1.0
+    # Part 5 only: if set, copy these attribute columns onto each transect
+    # (value from the intersecting feature nearest the transect origin) instead
+    # of adding a Hit_IN_<name> flag.
+    columns: tuple[str, ...] | None = None
 
+    def __post_init__(self) -> None:
+        if isinstance(self.columns, str):
+            self.columns = (self.columns,)
+        elif self.columns is not None:
+            self.columns = tuple(self.columns)
+            if not self.columns:
+                raise ValueError("LayerSpec.columns must not be empty when set.")
 
 def normalize_asset_specs(
     asset_layers: dict[str, "LayerSpec | str | dict"] | None,

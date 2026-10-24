@@ -34,10 +34,11 @@ DROP_WATER = False
 
 # Select "county" for the standard county transects or "outer" for the
 # expanded coastal transects.
-MODE = "county"
+MODE = "PugetSound"
+
 MODE_CONFIGS = {
-    "county": {
-        "region_name": "jefferson",
+    "PugetSound": {
+        "region_name": "thurston",
         "transect_root": Path(
             r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\Counties"
         ),

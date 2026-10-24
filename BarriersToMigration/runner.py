@@ -22,6 +22,7 @@ import logging
 import os
 
 from config import BarrierConfig, LayerSpec
+from helpers import layer_spec_exists
 from part1_trim import trim_and_export
 from part2_transects import generate_transects
 from part3_barriers import find_barriers_and_export
@@ -33,7 +34,7 @@ from part5_habitats import tag_habitat_intersections_and_export
 # ---------------------------
 # county = "jefferson"  # lower case
 county_list = [
-    "clallam",
+    "thurston",
     "jefferson",
     "king",
     "kitsap",
@@ -41,7 +42,7 @@ county_list = [
     "pierce",
     "skagit",
     "snohomish",
-    "thurston",
+    "clallam",
     "whatcom",
     "island",
     "san_juan",
@@ -194,7 +195,11 @@ def main() -> None:
             ),
         }
 
-        missing = [n for n, s in HAZARD_LAYERS.items() if not os.path.exists(s.path)]
+        missing = [
+            n
+            for n, s in HAZARD_LAYERS.items()
+            if not layer_spec_exists(s.path, s.layer)
+        ]
         tagged_transects = barriers
         if missing:
             logging.getLogger("barriers_to_migration").warning(
@@ -215,7 +220,20 @@ def main() -> None:
         # Habitat layers (Part 5)
         # ---------------------------
         # Each key prefixes the habitat hit, count, and source attribute columns.
+        # `path` may be a single-layer file (.shp) or a multi-layer container
+        # (.gpkg or an Esri File Geodatabase .gdb folder); for containers set
+        # `layer` to the feature class name, e.g.
+        #   "eelgrass": LayerSpec(
+        #       path=os.path.join(habitat_dir, "Habitats.gdb"),
+        #       layer="eelgrass_polygons",
+        #       kind="polygon",
+        #   ),
+        # Set `columns=` (one name or a tuple) to append those attributes from the
+        # intersecting feature nearest each transect origin instead of tagging hits.
         habitat_dir = r"D:\Data\Habitat"
+        shorezone_gdb = os.path.join(
+            habitat_dir, "state_DNR_ShoreZone", "shorezone_themes.gdb"
+        )
         HABITAT_LAYERS: dict[str, LayerSpec] = {
             "shellfish_growing": LayerSpec(
                 path=os.path.join(
@@ -267,17 +285,40 @@ def main() -> None:
                 path=os.path.join(habitat_dir, "seal haul-out", "sealion_haulout.shp"),
                 kind="polygon",
             ),
-            "shorezone_line": LayerSpec(
-                path=os.path.join(habitat_dir, "ShoreZone", "szline.shp"),
-                kind="line",
+            # ShoreZone alongshore lines: every transect crosses them, so append
+            # the chosen attribute (from the segment nearest the transect origin)
+            # rather than tagging a hit. Column name = the dictionary key.
+            "shorezone_eelgrass": LayerSpec(
+                path=shorezone_gdb, layer="eelline", kind="line", columns="EELGRASS"
             ),
-            "shorezone_polygon": LayerSpec(
-                path=os.path.join(habitat_dir, "ShoreZone", "szpoly.shp"),
-                kind="polygon",
+            "shorezone_kelp": LayerSpec(
+                path=shorezone_gdb, layer="kelpline", kind="line", columns="ALLKELP"
+            ),
+            "shorezone_surfgrass": LayerSpec(
+                path=shorezone_gdb, layer="surfline", kind="line", columns="SURFGRASS"
+            ),
+            "shorezone_sargassum": LayerSpec(
+                path=shorezone_gdb, layer="sargline", kind="line", columns="SARGASSUM"
+            ),
+            "shorezone_saltmarsh": LayerSpec(
+                path=shorezone_gdb, layer="saltline", kind="line", columns="SALTMARSH"
+            ),
+            "shorezone_dunegrass": LayerSpec(
+                path=shorezone_gdb, layer="graline", kind="line", columns="DUNEGRASS"
+            ),
+            "shorezone_protection": LayerSpec(
+                path=shorezone_gdb, layer="expline", kind="line", columns="EXP_CLASS"
+            ),
+            "shorezone_shoreline": LayerSpec(
+                path=shorezone_gdb, layer="shorline", kind="line", columns="BC_NAME"
             ),
         }
 
-        missing = [n for n, s in HABITAT_LAYERS.items() if not os.path.exists(s.path)]
+        missing = [
+            n
+            for n, s in HABITAT_LAYERS.items()
+            if not layer_spec_exists(s.path, s.layer)
+        ]
         if missing:
             logging.getLogger("barriers_to_migration").warning(
                 "%s: skipping Part 5; habitat layer(s) not found: %s",

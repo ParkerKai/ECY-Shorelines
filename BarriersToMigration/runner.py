@@ -27,7 +27,7 @@ from part1_trim import trim_and_export
 from part2_transects import generate_transects
 from part3_barriers import find_barriers_and_export
 from part4_hazards import flag_hazard_hits_and_export
-from part5_habitats import tag_habitat_intersections_and_export
+from part5_habitats import discover_wetland_layers, tag_habitat_intersections_and_export
 
 # ---------------------------
 # User configuration
@@ -313,6 +313,17 @@ def main() -> None:
                 path=shorezone_gdb, layer="shorline", kind="line", columns="BC_NAME"
             ),
         }
+
+        wetlands_path = os.path.join(
+            r"N:\SEA\Kai\Data\CCAP\Extracted_Polygons\wetlands",
+            f"Wetlands_{county.capitalize()}.gpkg",
+        )
+        if os.path.exists(wetlands_path):
+            HABITAT_LAYERS.update(discover_wetland_layers(wetlands_path))
+        else:
+            logging.getLogger("barriers_to_migration").warning(
+                "%s: wetlands GeoPackage not found: %s", county, wetlands_path
+            )
 
         missing = [
             n

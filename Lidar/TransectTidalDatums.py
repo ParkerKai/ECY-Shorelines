@@ -5,6 +5,8 @@ vyperdatum (NOAA VDatum grids in PROJ) to find the elevation of every available
 tidal datum relative to NAVD88 at each point. Results are written as a new
 layer in the same transects.gpkg.
 
+RUN IN TERMINAL, NOT IN AN INTERACTIVE KERNEL.
+
 Requires vyperdatum with the NOAA grids/proj.db downloaded to VYPER_GRIDS_DIR.
 """
 
@@ -58,7 +60,20 @@ METHOD_COL = "tidal_fill_method"
 DIST_COL = "tidal_fill_dist_m"
 QAQC_COL = "tidal_qaqc"
 
-COUNTY = "thurston"
+county_list = [
+    "thurston",
+    "jefferson",
+    "king",
+    "kitsap",
+    "mason",
+    "pierce",
+    "skagit",
+    "snohomish",
+    "clallam",
+    "whatcom",
+    "island",
+    "san_juan",
+]
 
 # NAD83(2011) geographic; datum elevations are reported relative to NAVD88.
 GEOG_CRS = "EPSG:6318"
@@ -209,57 +224,59 @@ def nearest_fill(
 
 
 def main() -> None:
-    gpkg = COUNTY_ROOT / COUNTY / TRANSECT_GPKG_NAME
-    print(f"Loading {TRANSECT_LAYER} from {gpkg}")
-    bases = gpd.read_file(gpkg, layer=TRANSECT_LAYER)
-    bases = bases[bases.geometry.notna() & ~bases.geometry.is_empty].reset_index(
-        drop=True
-    )
-    if bases.empty:
-        raise SystemExit("No transect base points found.")
+    
+    for COUNTY in county_list:
+        gpkg = COUNTY_ROOT / COUNTY / TRANSECT_GPKG_NAME
+        print(f"Loading {TRANSECT_LAYER} from {gpkg}")
+        bases = gpd.read_file(gpkg, layer=TRANSECT_LAYER)
+        bases = bases[bases.geometry.notna() & ~bases.geometry.is_empty].reset_index(
+            drop=True
+        )
+        if bases.empty:
+            raise SystemExit("No transect base points found.")
 
-    # Fall back to the ballpark NAD83 -> NAD83(2011) shift (~1 m) when the HARN grid is not local.
-    to_geog = PyprojTransformer.from_crs(
-        bases.crs, GEOG_CRS, always_xy=True, only_best=False
-    )
-    lon, lat = to_geog.transform(
-        bases.geometry.x.to_numpy(), bases.geometry.y.to_numpy()
-    )
-
-    datum_codes = find_datum_crs_codes()
-    if not datum_codes:
-        raise SystemExit(
-            f"No NOAA tidal datum CRSs found; check {VYPER_GRIDS_DIR} / proj.db."
+        # Fall back to the ballpark NAD83 -> NAD83(2011) shift (~1 m) when the HARN grid is not local.
+        to_geog = PyprojTransformer.from_crs(
+            bases.crs, GEOG_CRS, always_xy=True, only_best=False
+        )
+        lon, lat = to_geog.transform(
+            bases.geometry.x.to_numpy(), bases.geometry.y.to_numpy()
         )
 
-    datum_tfs: dict[str, Transformer] = {}
-    for datum, codes in datum_codes.items():
-        best, best_code, best_tf = None, None, None
-        for code in codes:
-            tf = build_transformer(code)
-            if tf is None:
+        datum_codes = find_datum_crs_codes()
+        if not datum_codes:
+            raise SystemExit(
+                f"No NOAA tidal datum CRSs found; check {VYPER_GRIDS_DIR} / proj.db."
+            )
+
+        datum_tfs: dict[str, Transformer] = {}
+        for datum, codes in datum_codes.items():
+            best, best_code, best_tf = None, None, None
+            for code in codes:
+                tf = build_transformer(code)
+                if tf is None:
+                    continue
+                z = datum_elevation(tf, lon, lat)
+                if z is not None and (
+                    best is None or np.isfinite(z).sum() > np.isfinite(best).sum()
+                ):
+                    best, best_code, best_tf = z, code, tf
+            col = f"{datum}_{REFERENCE_LABEL}_m"
+            if best is None or not np.isfinite(best).any():
+                print(f"{datum}: no valid values")
                 continue
-            z = datum_elevation(tf, lon, lat)
-            if z is not None and (
-                best is None or np.isfinite(z).sum() > np.isfinite(best).sum()
-            ):
-                best, best_code, best_tf = z, code, tf
-        col = f"{datum}_{REFERENCE_LABEL}_m"
-        if best is None or not np.isfinite(best).any():
-            print(f"{datum}: no valid values")
-            continue
-        bases[col] = best
-        datum_tfs[col] = best_tf
-        print(f"{datum} ({best_code}): {np.isfinite(best).sum()}/{len(best)} points")
+            bases[col] = best
+            datum_tfs[col] = best_tf
+            print(f"{datum} ({best_code}): {np.isfinite(best).sum()}/{len(best)} points")
 
-    print(f"Loading {TRANSECT_LINES_LAYER} from {gpkg}")
-    transects = gpd.read_file(gpkg, layer=TRANSECT_LINES_LAYER).drop_duplicates(KEYS)
-    sx, sy = seaward_search(bases, transects, datum_tfs, to_geog)
-    nearest_fill(bases, list(datum_tfs), sx, sy)
+        print(f"Loading {TRANSECT_LINES_LAYER} from {gpkg}")
+        transects = gpd.read_file(gpkg, layer=TRANSECT_LINES_LAYER).drop_duplicates(KEYS)
+        sx, sy = seaward_search(bases, transects, datum_tfs, to_geog)
+        nearest_fill(bases, list(datum_tfs), sx, sy)
 
-    # Writing a named layer replaces only that layer; other layers in the gpkg are kept.
-    bases.to_file(gpkg, layer=OUT_LAYER, driver="GPKG")
-    print(f"Wrote {len(bases)} points to {gpkg} (layer '{OUT_LAYER}')")
+        # Writing a named layer replaces only that layer; other layers in the gpkg are kept.
+        bases.to_file(gpkg, layer=OUT_LAYER, driver="GPKG")
+        print(f"Wrote {len(bases)} points to {gpkg} (layer '{OUT_LAYER}')")
 
 
 if __name__ == "__main__":

@@ -54,7 +54,7 @@ MODE = "PugetSound"
 
 MODE_CONFIGS = {
     "PugetSound": {
-        "region_name": "thurston",
+        "region_name": "skagit",
         "region_root": Path(r"N:\SEA\Kai\Data\BarriersToMigration\counties_v4"),
         "output_root": Path(r"D:\Data\Lidar\county_change"),
         "max_pixels": 2_000_000_000,

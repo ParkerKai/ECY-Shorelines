@@ -12,6 +12,19 @@ from helpers import ensure_crs, finalize_clean, safe_write_gpkg
 logger = logging.getLogger("barriers_to_migration")
 
 
+def discover_wetland_layers(
+    path: str, prefix: str = "CCAP_"
+) -> dict[str, LayerSpec]:
+    """Return one polygon habitat spec for every layer in a wetlands GeoPackage."""
+    layer_names = gpd.list_layers(path)["name"].astype(str).tolist()
+    return {
+        f"{prefix}{layer_name}": LayerSpec(
+            path=path, layer=layer_name, kind="polygon"
+        )
+        for layer_name in layer_names
+    }
+
+
 def _transect_origins(transects: gpd.GeoDataFrame) -> np.ndarray:
     """Shoreline origin point per transect (origin_x/y, else the middle vertex)."""
     coords = shapely.get_coordinates(transects.geometry.values)

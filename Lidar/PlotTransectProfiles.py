@@ -46,7 +46,7 @@ TIDAL_DATUM_LAYER = "transect_bases_tidal_datums"
 
 # Transect to plot, matching the id columns carried through from the transects.
 PATH_ID = 0
-SAMPLE_ID = 9466
+SAMPLE_ID = 36070
 
 # None = show the figure interactively, otherwise a directory to save a PNG in.
 OUT_DIR = None
@@ -58,6 +58,8 @@ CAUSE_MARKERS = {"reference core": "x", "closing": "^", "fill/other": "s"}
 
 # Datum whose contour position is tracked through time: "MLLW", "LMSL" or "MHHW".
 CROSSING_DATUM = "MHHW"
+# Transects extend 150 m landward and seaward of the shoreline, so the shoreline is at 150 m.
+SHORELINE_DIST_M = 150.0
 POINT_SIGMA_Z_M = 0.20 / 1.96  # 1-sigma vertical lidar uncertainty (20 cm is the 95% CI)
 SLOPE_WINDOW_M = 2.0  # half-width of the window used for the local beach slope at a crossing
 
@@ -184,7 +186,7 @@ def wet_causes(dist, z, wet, in_core, water_z, tolerance):
 
 
 def seaward_crossing(dist, z, wet, level):
-    """Smallest dist_m where the dry profile crosses `level`, linearly interpolated."""
+    """dist_m of the crossing of `level` closest to SHORELINE_DIST_M, linearly interpolated."""
     z = np.where(wet, np.nan, z)
     d = z - level
     d0, d1 = d[:-1], d[1:]
@@ -193,11 +195,9 @@ def seaward_crossing(dist, z, wet, level):
     idx = np.flatnonzero(hit)
     if idx.size == 0:
         return np.nan
-    i = idx[0]
-    if d0[i] == 0:
-        return dist[i]
-    t = d0[i] / (d0[i] - d1[i])
-    return dist[i] + t * (dist[i + 1] - dist[i])
+    t = np.divide(d0[idx], d0[idx] - d1[idx], out=np.zeros(idx.size), where=d0[idx] != 0)
+    xs = dist[idx] + t * (dist[idx + 1] - dist[idx])
+    return xs[np.argmin(np.abs(xs - SHORELINE_DIST_M))]
 
 
 def local_slope(dist, z, wet, x0, window):

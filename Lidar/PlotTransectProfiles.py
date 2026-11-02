@@ -29,7 +29,7 @@ from BuildWaterMaskIndex import (
     Z_TOLERANCE,
 )
 
-REGION_NAME = "thurston"
+REGION_NAME = "island"
 
 PROFILE_DIR = Path(r"D:\Data\Lidar\county_change") / REGION_NAME / "profiles"
 
@@ -45,8 +45,8 @@ TIDAL_DATUM_GPKG = (
 TIDAL_DATUM_LAYER = "transect_bases_tidal_datums"
 
 # Transect to plot, matching the id columns carried through from the transects.
-PATH_ID = 0
-SAMPLE_ID = 36070
+PATH_ID = 14
+SAMPLE_ID = 145731
 
 # None = show the figure interactively, otherwise a directory to save a PNG in.
 OUT_DIR = None

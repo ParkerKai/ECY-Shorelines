@@ -101,13 +101,13 @@ BUFFER_QUAD_SEGS = 2
 # Elevations are metres NAVD88 throughout.
 # Band searched for the water plane. Must bracket the local tidal range but
 # stay below anything that could be real upland terrain.
-SEARCH_RANGE = (-2.0, 4.0)
+SEARCH_RANGE = (-0.5, 4.0)  # Oct 30, 2026: Tuned from (-2.0, 4.0) to exclude deep bathymetry
 
 # Gradient magnitude (rise/run) below which an averaged cell counts as flat.
-FLAT_SLOPE = 0.02
+FLAT_SLOPE = 0.01  # Oct 30, 2026: Tuned from 0.02 (2x stricter to eliminate 40% bathymetry contamination)
 # Grid the water-plane histogram is built on. Coarse enough to average out
 # speckle, fine enough that the beach face still registers as sloped.
-HIST_RES_M = 10.0
+HIST_RES_M = 15.0  # Oct 30, 2026: Tuned from 10.0 for better speckle suppression on smooth water
 HIST_BIN_M = 0.05
 
 # Half-width of the window around the peak bin used to refine the estimate.

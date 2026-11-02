@@ -38,7 +38,7 @@ MODE = "PugetSound"
 
 MODE_CONFIGS = {
     "PugetSound": {
-        "region_name": "thurston",
+        "region_name": "snohomish", 
         "transect_root": Path(
             r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\Counties"
         ),
@@ -52,6 +52,8 @@ MODE_CONFIGS = {
 }
 
 if MODE not in MODE_CONFIGS:
+    
+    
     raise SystemExit(f"Unknown MODE {MODE!r}; choose from {sorted(MODE_CONFIGS)}")
 
 MODE_CONFIG = MODE_CONFIGS[MODE]

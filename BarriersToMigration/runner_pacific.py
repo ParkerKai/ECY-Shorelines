@@ -33,12 +33,12 @@ from part5_habitats import discover_wetland_layers, tag_habitat_intersections_an
 # ---------------------------
 
 county_list = [
-#    "clallam",
-#    "jefferson",
-   # "grays_harbor",
-   # "kitsap",
-   # "pacific",
-    "wahkiakum",
+#   "clallam",
+#   "jefferson",
+#   "grays_harbor",
+#   "kitsap",
+#   "pacific",
+   "wahkiakum",
 ]
 
 

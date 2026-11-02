@@ -25,17 +25,32 @@ import pyogrio
 from scipy import stats
 
 PROFILE_ROOT = Path(r"D:\Data\Lidar\county_change")
+OUT_ROOT = Path(r"N:\SEA\Kai\Data\lidar\ShorelineChange")
 TRANSECT_ROOT = Path(r"N:\SEA\Kai\Data\BarriersToMigration\counties_v4")
 TIDAL_DATUM_LAYER = "transect_bases_tidal_datums"
 
 # Counties to process; None = every county with both profiles and transects.
-REGIONS = ['Thurston']
+REGIONS = [
+    "thurston",
+    "jefferson",
+    "king",
+    "kitsap",
+    "mason",
+    "pierce",
+    "skagit",
+    "snohomish",
+    "clallam",
+    "whatcom",
+    "island",
+    "san_juan",
+]
 
 # Written to PROFILE_ROOT / <region> / OUT_NAME, one layer per crossing datum.
-OUT_NAME = Path(r"N:\SEA\Kai\Data\lidar\ShorelineChange\shoreline_change.gpkg")
+OUT_NAME = "shoreline_change.gpkg"
 
 # Datum whose contour position is tracked through time: "MLLW", "LMSL" or "MHHW".
 CROSSING_DATUM = "MHHW"
+
 # Transects extend 150 m landward and seaward of the shoreline, so the shoreline is at 150 m.
 SHORELINE_DIST_M = 150.0
 POINT_SIGMA_Z_M = 0.20 / 1.96  # 1-sigma vertical lidar uncertainty (20 cm is the 95% CI)
@@ -228,7 +243,9 @@ def process_region(region):
     out.insert(0, "region", region)
     out["datum"] = CROSSING_DATUM
 
-    out_path = PROFILE_ROOT / region / OUT_NAME
+    out_path = OUT_ROOT / region / OUT_NAME
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    
     layer = f"shoreline_change_{CROSSING_DATUM}"
     pyogrio.write_dataframe(out, out_path, layer=layer, driver="GPKG")
     counts = out["change"].value_counts().to_dict()

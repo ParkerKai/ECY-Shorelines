@@ -18,13 +18,18 @@ import rasterio
 from pyproj import CRS, Transformer
 from shapely import get_coordinates, line_interpolate_point
 
+from BuildWaterMaskIndex import check_mask_coverage
+
 INDEX_GPKG = Path(r"D:\Data\Lidar\lidar_tile_index_dtm.gpkg")
 TILE_LAYER = "tiles"
 SCAN_LAYER = "scans"
 
 # Surface-water returns tagged by BuildWaterMaskIndex.py. Lidar flown at high
 # tide images the sea surface as terrain, which would otherwise appear as
-# metres of fake elevation change between scans.
+# metres of fake elevation change between scans. The mask cuts each scan at its
+# water plane: everything seaward of where the plane meets the beach is water,
+# everything landward is land, so a sample is land exactly when it is not on
+# water_scans. Topobathy scans are deliberately left unmasked.
 WATER_MASK_GPKG = Path(r"D:\Data\Lidar\lidar_water_mask_dtm.gpkg")
 WATER_SCAN_LAYER = "water_scans"
 APPLY_WATER_MASK = True
@@ -38,7 +43,7 @@ MODE = "PugetSound"
 
 MODE_CONFIGS = {
     "PugetSound": {
-        "region_name": "snohomish", 
+        "region_name": "whatcom", 
         "transect_root": Path(
             r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\Counties"
         ),
@@ -221,6 +226,7 @@ if not DROP_WATER:
     out_cols.append("water")
 
 written = []
+sampled_scans = []
 for scan_name in scans["scan"]:
     scan_tiles = tiles[tiles["scan"] == scan_name]
     if scan_tiles.empty:
@@ -241,6 +247,7 @@ for scan_name in scans["scan"]:
         f"{len(scan_samples)} samples, {len(scan_tiles)} tiles"
     )
     z = sample_scan(scan_tiles, scan_samples, transects.crs)
+    sampled_scans.append(scan_name)
 
     wet = water_flags(water, scan_name, scan_samples, transects.crs)
     if wet.any():
@@ -264,3 +271,5 @@ for scan_name in scans["scan"]:
     print(f"  wrote {len(profile)} rows to {out_path.name}")
 
 print(f"Wrote {len(written)} scan profile files to {OUT_DIR}")
+if APPLY_WATER_MASK and WATER_MASK_GPKG.exists():
+    check_mask_coverage(sampled_scans, WATER_MASK_GPKG)

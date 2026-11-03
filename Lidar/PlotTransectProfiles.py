@@ -4,12 +4,16 @@ Reads the per-scan Parquet files written by TransectLidarProfiles.py and
 overlays each scan's elevation profile for the chosen transect, so changes in
 the profile over time are visible directly.
 
-Stretches flagged as water are drawn as a band over the line, and each scan's
-detected water plane is drawn as a horizontal rule, so the mask can be checked
-against the elevations it was derived from. Reading the flags requires
-TransectLidarProfiles.py to have been run with DROP_WATER = False; with
-DROP_WATER = True the wet samples are deleted and cannot be told apart from
-ordinary gaps in coverage.
+Stretches flagged as water are drawn as a band over the line, and the water
+plane of the tile under the transect (or the scan plane, failing that) is drawn
+as a horizontal rule, so the mask can be checked against the elevations it was
+derived from. The mask cuts each scan at its water plane: everything seaward of
+where the plane meets the beach is water (wave crests included), everything
+landward is land. Each water/land transition is marked on the profile, which
+on a shore-normal transect should be a single point at the plane. Reading the
+flags requires TransectLidarProfiles.py to have been run with DROP_WATER =
+False; with DROP_WATER = True the wet samples are deleted and cannot be told
+apart from ordinary gaps in coverage.
 """
 
 import re
@@ -21,13 +25,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 from matplotlib.lines import Line2D
 
-from BuildWaterMaskIndex import (
-    CLOSING_M,
-    REFERENCE_SIMPLIFY_M,
-    REFERENCE_WATER,
-    SEED_EROSION_M,
-    Z_TOLERANCE,
-)
+from BuildWaterMaskIndex import INDEX_GPKG, TILE_LAYER, is_skipped_scan
 
 REGION_NAME = "island"
 
@@ -36,6 +34,9 @@ PROFILE_DIR = Path(r"D:\Data\Lidar\county_change") / REGION_NAME / "profiles"
 # Water planes detected by BuildWaterMaskIndex.py.
 WATER_MASK_GPKG = Path(r"D:\Data\Lidar\lidar_water_mask_dtm.gpkg")
 WATER_SCAN_LAYER = "water_scans"
+# Each tile can carry its own plane, so the one drawn is that of the tile under
+# the transect. Falls back to the scan plane when no tile can be matched.
+WATER_TILE_LAYER = "water_tiles"
 
 TIDAL_DATUM_GPKG = (
     Path(r"N:\SEA\Kai\Data\BarriersToMigration\counties_v4")
@@ -46,22 +47,27 @@ TIDAL_DATUM_LAYER = "transect_bases_tidal_datums"
 
 # Transect to plot, matching the id columns carried through from the transects.
 PATH_ID = 14
-SAMPLE_ID = 145731
+SAMPLE_ID = 139691
 
 # None = show the figure interactively, otherwise a directory to save a PNG in.
-OUT_DIR = None
+OUT_DIR = r"N:\SEA\Kai\Figures\LIdar\TransectPlots"
 
 SHOW_WATER_PLANE = True
-# Attribute samples flagged wet above the water plane to the mask step that caught them.
+# Mark water/land transitions and report samples on the "wrong" side of the
+# plane: wet above it (seaward roughness, filled holes) and dry at or below it
+# (low ground not connected to open water).
 SHOW_MASK_DIAGNOSTICS = True
-CAUSE_MARKERS = {"reference core": "x", "closing": "^", "fill/other": "s"}
 
 # Datum whose contour position is tracked through time: "MLLW", "LMSL" or "MHHW".
 CROSSING_DATUM = "MHHW"
 # Transects extend 150 m landward and seaward of the shoreline, so the shoreline is at 150 m.
 SHORELINE_DIST_M = 150.0
-POINT_SIGMA_Z_M = 0.20 / 1.96  # 1-sigma vertical lidar uncertainty (20 cm is the 95% CI)
-SLOPE_WINDOW_M = 2.0  # half-width of the window used for the local beach slope at a crossing
+POINT_SIGMA_Z_M = (
+    0.20 / 1.96
+)  # 1-sigma vertical lidar uncertainty (20 cm is the 95% CI)
+SLOPE_WINDOW_M = (
+    2.0  # half-width of the window used for the local beach slope at a crossing
+)
 
 # Trailing 4-digit year in the scan folder name, used for ordering and colour.
 YEAR_PATTERN = re.compile(r"(\d{4})")
@@ -101,21 +107,78 @@ def load_profiles(path_id, sample_id):
 
 
 def load_water_planes():
-    """Detected water level, method and Z tolerance per scan, keyed by scan name."""
+    """Detected scan-level water level and method, keyed by scan name."""
     if not SHOW_WATER_PLANE or not WATER_MASK_GPKG.exists():
         return {}
     import geopandas as gpd
 
     water = gpd.read_file(WATER_MASK_GPKG, layer=WATER_SCAN_LAYER)
-    # Masks built before the per-scan tolerance existed used Z_TOLERANCE.
-    return {
-        r["scan"]: (
-            r["water_z"],
-            r["method"] if "method" in water else "",
-            r["z_tolerance"] if "z_tolerance" in water else Z_TOLERANCE,
+    if "z_tolerance" in water:
+        print(
+            f"WARNING: {WATER_MASK_GPKG.name} still has a z_tolerance column, so "
+            "it predates the water-plane cut. Re-run BuildWaterMaskIndex.py"
         )
+    return {
+        r["scan"]: (r["water_z"], r["method"] if "method" in water else "")
         for _, r in water.iterrows()
     }
+
+
+def load_tile_planes(profiles):
+    """(water_z, plane source) of the tile under this transect, keyed by scan name.
+
+    Tiles overlap, so the tile whose footprint holds the most of a scan's
+    samples is used.
+    """
+    if not SHOW_WATER_PLANE or not WATER_MASK_GPKG.exists():
+        return {}
+    if not {"x", "y"} <= set(profiles) or not TIDAL_DATUM_GPKG.exists():
+        return {}
+    import geopandas as gpd
+    import pyogrio
+    import shapely
+
+    if WATER_TILE_LAYER not in pyogrio.list_layers(WATER_MASK_GPKG)[:, 0]:
+        return {}
+    tile_water = pyogrio.read_dataframe(
+        WATER_MASK_GPKG, layer=WATER_TILE_LAYER, read_geometry=False
+    )
+    if not {"scan", "path", "water_z"} <= set(tile_water):
+        return {}
+    if "plane" not in tile_water:
+        tile_water["plane"] = ""
+
+    # Assumes the profile x/y share the CRS of the transect layers in this GeoPackage.
+    crs = pyogrio.read_info(TIDAL_DATUM_GPKG, layer=TIDAL_DATUM_LAYER)["crs"]
+    points = gpd.GeoSeries(
+        gpd.points_from_xy(profiles["x"], profiles["y"]), crs=crs
+    )
+    index_crs = pyogrio.read_info(INDEX_GPKG, layer=TILE_LAYER)["crs"]
+    points = points.to_crs(index_crs)
+    footprints = gpd.read_file(
+        INDEX_GPKG,
+        layer=TILE_LAYER,
+        bbox=tuple(points.total_bounds),
+        columns=["scan", "path"],
+    )
+    footprints = footprints.merge(
+        tile_water[["scan", "path", "water_z", "plane"]], on=["scan", "path"]
+    )
+
+    scans = profiles["scan"].to_numpy()
+    planes = {}
+    for scan, tiles in footprints.groupby("scan"):
+        pts = points.values[scans == scan]
+        if not len(pts):
+            continue
+        counts = [
+            int(shapely.contains(geom, pts).sum()) for geom in tiles.geometry.values
+        ]
+        best = int(np.argmax(counts))
+        if counts[best]:
+            row = tiles.iloc[best]
+            planes[scan] = (row["water_z"], row["plane"])
+    return planes
 
 
 def load_tidal_datums(path_id, sample_id):
@@ -137,57 +200,19 @@ def load_tidal_datums(path_id, sample_id):
     return tuple(df[cols].iloc[0])
 
 
-def load_reference_core(profiles):
-    """Reference water eroded to the always-masked core, as BuildWaterMaskIndex.py builds it."""
-    if REFERENCE_WATER is None or not Path(REFERENCE_WATER).exists():
-        return None
-    import geopandas as gpd
-    import pyogrio
-    import shapely
-    from shapely.geometry import box
-
-    # Assumes the profile x/y share the CRS of the transect layers in this GeoPackage.
-    crs = pyogrio.read_info(TIDAL_DATUM_GPKG, layer=TIDAL_DATUM_LAYER)["crs"]
-    area = box(
-        profiles["x"].min(),
-        profiles["y"].min(),
-        profiles["x"].max(),
-        profiles["y"].max(),
-    ).buffer(2 * SEED_EROSION_M)
-    ref = gpd.read_file(REFERENCE_WATER, bbox=gpd.GeoSeries([area], crs=crs))
-    if ref.empty:
-        return None
-    geom = shapely.force_2d(ref.geometry.to_crs(crs).values)
-    geom = shapely.make_valid(shapely.simplify(geom, REFERENCE_SIMPLIFY_M))
-    return shapely.union_all(geom).buffer(-SEED_EROSION_M, quad_segs=2)
-
-
-def wet_causes(dist, z, wet, in_core, water_z, tolerance):
-    """Label each wet sample with the mask step most likely responsible."""
-    cut = water_z + tolerance
-    cause = np.full(z.shape, "", dtype=object)
-    cause[wet & (z <= cut)] = "below plane"
-    above = wet & (z > cut)
-    cause[above & in_core] = "reference core"
-    rest = np.flatnonzero(above & ~in_core)
-    low = dist[z <= cut]
-    if rest.size:
-        # Along-profile distance only bounds the planar one, so "fill/other" may
-        # still be closing across wet cells beside the transect. Closing only
-        # bridges gaps up to 2 * CLOSING_M wide, so CLOSING_M from the nearest
-        # below-plane sample is the most it can reach.
-        gap = (
-            np.abs(dist[rest, None] - low[None, :]).min(axis=1)
-            if low.size
-            else np.full(rest.size, np.inf)
-        )
-        cause[rest] = np.where(gap <= CLOSING_M, "closing", "fill/other")
-    return cause
+def mask_transitions(dist, wet):
+    """dist_m midway between each pair of adjacent samples where wet flips."""
+    flip = np.flatnonzero(wet[:-1] != wet[1:])
+    return (dist[flip] + dist[flip + 1]) / 2
 
 
 def seaward_crossing(dist, z, wet, level):
-    """dist_m of the crossing of `level` closest to SHORELINE_DIST_M, linearly interpolated."""
-    z = np.where(wet, np.nan, z)
+    """dist_m of the crossing of `level` closest to SHORELINE_DIST_M, linearly interpolated.
+    
+    Note: wet flag is NOT applied here because datum crossings may occur at elevations
+    where the water mask is active. The water mask is designed to account for tidal
+    differences in satellite imagery, not to exclude data from topographic analysis.
+    """
     d = z - level
     d0, d1 = d[:-1], d[1:]
     # Only adjacent valid samples, so crossings are never interpolated across gaps.
@@ -195,7 +220,9 @@ def seaward_crossing(dist, z, wet, level):
     idx = np.flatnonzero(hit)
     if idx.size == 0:
         return np.nan
-    t = np.divide(d0[idx], d0[idx] - d1[idx], out=np.zeros(idx.size), where=d0[idx] != 0)
+    t = np.divide(
+        d0[idx], d0[idx] - d1[idx], out=np.zeros(idx.size), where=d0[idx] != 0
+    )
     xs = dist[idx] + t * (dist[idx + 1] - dist[idx])
     return xs[np.argmin(np.abs(xs - SHORELINE_DIST_M))]
 
@@ -213,18 +240,18 @@ def local_slope(dist, z, wet, x0, window):
 
 profiles, unflagged = load_profiles(PATH_ID, SAMPLE_ID)
 planes = load_water_planes()
+tile_planes = load_tile_planes(profiles)
 datums = load_tidal_datums(PATH_ID, SAMPLE_ID)
 
-core = None
-if SHOW_MASK_DIAGNOSTICS and {"x", "y"} <= set(profiles):
-    import shapely
 
-    core = load_reference_core(profiles)
-    profiles["in_core"] = (
-        shapely.intersects_xy(core, profiles["x"], profiles["y"])
-        if core is not None
-        else False
-    )
+def plane_for(scan):
+    """(water_z, method, source) drawn for a scan; tile plane first."""
+    water_z, method = planes.get(scan, (None, ""))
+    if scan in tile_planes:
+        tile_z, source = tile_planes[scan]
+        return tile_z, method, source or "tile"
+    return water_z, method, "scan" if water_z is not None else ""
+
 
 if unflagged:
     print(
@@ -252,8 +279,17 @@ for scan, colour in zip(scans, colours):
     z = profile["z"].to_numpy()
     wet = profile["water"].to_numpy()
 
-    water_z, method, tolerance = planes.get(scan, (None, "", Z_TOLERANCE))
-    label = scan if water_z is None else f"{scan}  ({water_z:+.2f} m {method})"
+    water_z, method, source = plane_for(scan)
+    short_method = (
+        "fallback"
+        if method.startswith("fallback")
+        else "detected"
+        if method.startswith("detected")
+        else method
+    )
+    if source.startswith("tile"):
+        short_method = "tile"
+    label = scan if water_z is None else f"{scan}  ({water_z:+.2f} m {short_method})"
 
     # Masked stretches sit under the line as a band, so they read as an
     # annotation of the profile rather than as a separate series.
@@ -272,45 +308,42 @@ for scan, colour in zip(scans, colours):
     if water_z is not None:
         ax.axhline(water_z, color=colour, linewidth=0.7, alpha=0.5, zorder=0)
 
-    if "in_core" in profile and water_z is not None and wet.any():
-        cause = wet_causes(
-            dist, z, wet, profile["in_core"].to_numpy(), water_z, tolerance
-        )
-        for name, marker in CAUSE_MARKERS.items():
-            sel = cause == name
-            if sel.any():
-                ax.scatter(
-                    dist[sel], z[sel], marker=marker, s=14, color=colour, zorder=3
-                )
-        counts = pd.Series(cause[wet]).value_counts()
-        print(
-            f"  {scan:40s} wet causes: "
-            + ", ".join(f"{k} {v}" for k, v in counts.items())
-        )
+    if SHOW_MASK_DIAGNOSTICS:
+        for x in mask_transitions(dist, wet):
+            ax.axvline(x, color=colour, linewidth=0.8, linestyle=":", zorder=1)
 
 print(f"{len(scans)} scans, {len(profiles)} samples for this transect")
-if SHOW_MASK_DIAGNOSTICS and core is None:
-    print("  (no reference core here, or profiles lack x/y; core attribution skipped)")
 for scan in scans:
     sub = profiles[profiles["scan"] == scan]
-    water_z, method, tolerance = planes.get(scan, (None, "", None))
-    plane = (
-        f"{water_z:+6.2f} +{tolerance:.2f} {method}"
-        if water_z is not None
-        else "no mask entry"
-    )
+    water_z, method, source = plane_for(scan)
+    if water_z is not None:
+        plane = f"{water_z:+6.2f} {method} ({source} plane)"
+    elif is_skipped_scan(scan):
+        plane = "unmasked by design (topobathy)"
+    else:
+        plane = "no water in mask"
     print(f"  {scan:40s} {int(sub['water'].sum()):5d}/{len(sub):5d} wet   {plane}")
+    if SHOW_MASK_DIAGNOSTICS and water_z is not None:
+        dist = sub["dist_m"].to_numpy()
+        z = sub["z"].to_numpy()
+        wet = sub["water"].to_numpy()
+        flips = mask_transitions(dist, wet)
+        wet_above = int((wet & (z > water_z)).sum())
+        dry_below = int((~wet & (z <= water_z)).sum())
+        print(
+            f"  {'':40s} waterline at {', '.join(f'{x:.1f}' for x in flips) or 'none'} m; "
+            f"{wet_above} wet above plane, {dry_below} dry at/below plane"
+        )
 
 handles, labels = ax.get_legend_handles_labels()
 handles.append(Line2D([], [], color="0.4", linewidth=6, alpha=0.30))
 labels.append("flagged wet")
-if planes:
+if planes or tile_planes:
     handles.append(Line2D([], [], color="0.4", linewidth=0.7, alpha=0.5))
     labels.append("water plane")
-if "in_core" in profiles:
-    for name, marker in CAUSE_MARKERS.items():
-        handles.append(Line2D([], [], color="0.4", marker=marker, linestyle=""))
-        labels.append(f"wet above plane: {name}")
+if SHOW_MASK_DIAGNOSTICS and profiles["water"].any():
+    handles.append(Line2D([], [], color="0.4", linewidth=0.8, linestyle=":"))
+    labels.append("water/land boundary")
 if datums is not None:
     handles += [
         plt.Rectangle((0, 0), 1, 1, color="tab:blue", alpha=0.12, linewidth=0),
@@ -322,8 +355,8 @@ ax.set_xlabel("Distance along transect (m)")
 ax.set_ylabel("Elevation (m NAVD88)")
 ax.set_title(f"Transect path_id={PATH_ID}, sample_id={SAMPLE_ID}")
 ax.grid(alpha=0.3)
-ax.legend(handles, labels, fontsize=7, loc="best", framealpha=0.9)
-ax.set_xlim(0, 200)
+ax.legend(handles, labels, fontsize=10, loc="best", framealpha=0.9)
+ax.set_xlim(50, 200)
 
 fig.tight_layout()
 
@@ -383,7 +416,9 @@ if datums is not None:
         xw = np.sum(w * x) / np.sum(w)
         sxx = np.sum(w * (x - xw) ** 2)
         dof = n - 2
-        chi2_red = np.sum(w * (y - (slope * x + intercept)) ** 2) / dof if dof > 0 else 1.0
+        chi2_red = (
+            np.sum(w * (y - (slope * x + intercept)) ** 2) / dof if dof > 0 else 1.0
+        )
         scale = max(1.0, chi2_red)
         slope_se = np.sqrt(scale / sxx)
         tcrit = stats.t.ppf(0.975, dof) if dof > 0 else 1.96
@@ -440,12 +475,12 @@ if OUT_DIR is None:
 else:
     out_dir = Path(OUT_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"transect_{PATH_ID}_{SAMPLE_ID}.png"
+    out_path = out_dir / f"transect_{REGION_NAME}{PATH_ID}_{SAMPLE_ID}.png"
     fig.savefig(out_path, dpi=150)
     print(f"Wrote {out_path}")
     if fig2 is not None:
         out_path = (
-            out_dir / f"transect_{PATH_ID}_{SAMPLE_ID}_{CROSSING_DATUM}_trend.png"
+            out_dir / f"transect_{REGION_NAME}_{PATH_ID}_{SAMPLE_ID}_{CROSSING_DATUM}_trend.png"
         )
         fig2.savefig(out_path, dpi=150)
         print(f"Wrote {out_path}")

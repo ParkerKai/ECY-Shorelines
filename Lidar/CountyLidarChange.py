@@ -35,12 +35,17 @@ from rasterio.warp import Resampling, reproject, transform_bounds
 from rasterio.windows import Window, from_bounds
 from shapely.geometry import box, shape
 
+from BuildWaterMaskIndex import check_mask_coverage
+
 INDEX_GPKG = Path(r"D:\Data\Lidar\lidar_tile_index_dtm.gpkg")
 TILE_LAYER = "tiles"
 
 # Surface-water returns tagged by BuildWaterMaskIndex.py. Lidar flown at high
 # tide images the sea surface as terrain, which would otherwise difference
-# against a low-tide scan as metres of fake elevation change.
+# against a low-tide scan as metres of fake elevation change. The mask cuts each
+# scan at its water plane, so every pixel of a scan is either water (dropped) or
+# land (kept); no separate land mask is needed. Topobathy scans are deliberately
+# left unmasked.
 WATER_MASK_GPKG = Path(r"D:\Data\Lidar\lidar_water_mask_dtm.gpkg")
 WATER_TILE_LAYER = "water_tiles"
 APPLY_WATER_MASK = True
@@ -360,6 +365,8 @@ def process_region(name, region_geom, tiles, water):
     print(f"  grid {shape_hw[1]}x{shape_hw[0]} at {TARGET_RES} m")
 
     hits = select_tiles(hits, region)
+    if APPLY_WATER_MASK and WATER_MASK_GPKG.exists():
+        check_mask_coverage(hits["scan"].unique(), WATER_MASK_GPKG)
     inside = features.geometry_mask(
         [region], out_shape=shape_hw, transform=transform, invert=True
     )

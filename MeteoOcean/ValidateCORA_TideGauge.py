@@ -52,9 +52,9 @@ Gauges = [
     "9449880",  # Friday Harbor
     "9449424",  # Cherry Point
     "9442396",  # La Push
-    "9440910",  #Toke Point
-    "9441102",    # Westport
-    "9440581"     # Cape Dissappointment
+    "9440910",  # Toke Point
+    "9441102",  # Westport
+    "9440581"   # Cape Dissappointment
 ]
 
 Gauge_name = [

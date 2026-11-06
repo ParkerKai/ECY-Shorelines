@@ -37,7 +37,7 @@ county_list = [
 #   "jefferson",
 #   "grays_harbor",
 #   "kitsap",
-#   "pacific",
+   "pacific",
    "wahkiakum",
 ]
 
@@ -73,7 +73,7 @@ for county in county_list:
 
     # Output directory
     out_dir = os.path.join(
-        r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\BarriersToMigration\CountyData_Outer",
+        r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\CountyData_Outer",
         county,
     )
 

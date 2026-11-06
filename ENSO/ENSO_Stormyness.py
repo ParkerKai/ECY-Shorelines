@@ -1,6 +1,6 @@
 """
-Aggregate COSMOS extreme water level and wave event data by county and ENSO year
-(March -> February), then compare El Nino years against the all-year distribution.
+Extract POT extreme water levels from tide gauge observations and compare El Nino
+ENSO years (March -> February) against all other years, per tide gauge.
 
 @author: kaparker
     WA Dept. of Ecology
@@ -8,278 +8,349 @@ Aggregate COSMOS extreme water level and wave event data by county and ENSO year
 """
 
 import os
+import sys
 
-import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import xarray as xr
+from matplotlib.lines import Line2D
+
+sns.set_theme(style="darkgrid")
+# Make gridlines more visible
+sns.set_context("notebook", rc={"grid.linewidth": 1.2})
+plt.rcParams['grid.color'] = 'black'
+plt.rcParams['grid.alpha'] = 0.6
+plt.rcParams['grid.linewidth'] = 1.2
+
+module_dir = r"C:\Users\kaip461\GitHub\Kai_Python\General_Functions"
+sys.path.insert(0, module_dir)
+from POT_Extremes_XR import compute_return_intervals_forwardstop_map
 
 # ===============================================================================
 # User Inputs
 # ===============================================================================
-extreme_wl_in = (
-    r"N:\SEA\Kai\Data\SLR_Atlas\Cosmos_Extremes_WL\Cosmos_Extremes_WL_Events.nc"
-)
-extreme_wave_in = (
-    r"N:\SEA\Kai\Data\SLR_Atlas\Cosmos_Extremes_Wave\Cosmos_Extremes_Wave_Events.nc"
-)
-county_in = r"N:\SEA\Kai\Data\BarriersToMigration\CountyBounds.shp"
-
+dir_in = r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\TideGauge\Hourly"
 dir_out = r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Projects\ENSO\figures"
 os.makedirs(dir_out, exist_ok=True)
 
-county_field = "COUNTY_NM"
+# Select tide gauges (same table as ENSO_WaterLevels_WAcombined.py)
+TG = [
+    {"station": "9440569", "name": "Skamokawa"},
+    {"station": "9439040", "name": "Astoria"},
+    {"station": "9440910", "name": "TokePoint"},
+    {"station": "9441102", "name": "Westport"},
+    {"station": "9442396", "name": "LaPush"},
+    {"station": "9443090", "name": "NeahBay"},
+    {"station": "9444090", "name": "PortAngeles"},
+    {"station": "9444900", "name": "PortTownsend"},
+    {"station": "9449880", "name": "FridayHarbor"},
+    {"station": "9449424", "name": "CherryPoint"},
+    {"station": "9447130", "name": "Seattle"},
+    {"station": "9446484", "name": "Tacoma"},
+]
+
+# Record trim (None or e.g. pd.Timestamp("1992-01-01"))
+dt_start = None
+# Fraction of hours with valid data for an ENSO year to count as in the record
+min_coverage = 0.5
+
+# POT settings
+RPs = np.array([1, 5, 10, 25, 50, 100])
+decluster_window = "72h"
+# 'peaks' keeps independent peaks >= decluster_window apart; 'runs' lets
+# successive high tides chain into multi-month clusters at tidal-range thresholds.
+decluster_method = "peaks"
+# ForwardStop threshold search band (percentiles of hourly water level)
+pot_pct_low = 99.6
+pot_pct_high = 99.9
 
 # El Nino peak years; each ENSO year runs Mar(year-1) -> Feb(year)
 enso_peak_years = [1983, 1998, 2016]
-detrend_for_comparison = True
-
-# Stations sit just offshore of the polygons, so snap them to the nearest
-# county within this distance (degrees) when they fall outside.
-max_snap_deg = 0.05
+enso_year_labels = {1983: "1982-1983", 1998: "1997-1998", 2016: "2015-2016"}
+detrend_timeseries_before_pot = True
 
 # ===============================================================================
 # Functions
 # ===============================================================================
 
 
-def assign_stations_to_counties(lon, lat, counties, field, max_snap_deg=0.05):
-    """Return a Series of county names indexed by station position."""
-    pts = gpd.GeoDataFrame(
-        {"idx": np.arange(len(lon))},
-        geometry=gpd.points_from_xy(lon, lat),
-        crs="EPSG:4326",
-    )
-    poly = counties[[field, "geometry"]].to_crs("EPSG:4326")
-
-    joined = gpd.sjoin(pts, poly, how="left", predicate="within")
-    joined = joined[~joined.index.duplicated(keep="first")]
-    names = joined[field]
-
-    missing = names.isna()
-    if missing.any() and max_snap_deg > 0:
-        # Nearest joins need a projected CRS; use the shapefile's native one.
-        proj_crs = counties.crs
-        snapped = gpd.sjoin_nearest(
-            pts.loc[missing.to_numpy()].to_crs(proj_crs),
-            counties[[field, "geometry"]],
-            how="left",
-            max_distance=max_snap_deg * 364000.0,  # ~degrees -> US survey feet
+def load_tide_gauges(tg_list, dir_in, dt_start=None):
+    """Load hourly observed water levels (m) into a (station, time) DataArray."""
+    series = {}
+    for row in tg_list:
+        stat = row["station"]
+        print(f"Loading station {stat} ({row['name']})...")
+        df = pd.read_parquet(
+            os.path.join(dir_in, f"NOAA_TG_{stat}", "combined_resolved.parquet")
         )
-        snapped = snapped[~snapped.index.duplicated(keep="first")]
-        names.loc[snapped.index] = snapped[field]
+        df["t"] = pd.to_datetime(df["t"])
+        s = df.sort_values("t").drop_duplicates("t").set_index("t")["v_obs"]
+        if dt_start is not None:
+            s = s.loc[pd.Timestamp(dt_start) :]
+        series[stat] = pd.to_numeric(s, errors="coerce")
 
-    return names.reindex(pts.index)
-
-
-def events_to_frame(ds, var, counties, field, max_snap_deg=0.05):
-    """Flatten a (station, event) extremes dataset to a tidy county-tagged frame."""
-    values = ds[var].values
-    times = ds["time"].values
-
-    county_by_station = assign_stations_to_counties(
-        ds["lon"].values, ds["lat"].values, counties, field, max_snap_deg
+    wide = pd.DataFrame(series).sort_index()
+    return xr.DataArray(
+        wide.to_numpy().T,
+        dims=("station", "time"),
+        coords={"station": list(wide.columns), "time": wide.index.to_numpy()},
+        name="waterlevel",
     )
-    county_codes = pd.Categorical(county_by_station.to_numpy())
 
-    # Most (station, event) slots are unused padding; drop them before flattening.
-    valid = np.isfinite(values) & ~np.isnat(times)
-    valid &= ~county_by_station.isna().to_numpy()[:, None]
-    st_idx, _ = np.nonzero(valid)
 
-    df = pd.DataFrame(
-        {
-            "station": st_idx.astype(np.int32),
-            "county": pd.Categorical.from_codes(
-                county_codes.codes[st_idx], categories=county_codes.categories
-            ),
-            "t": times[valid],
-            "value": values[valid],
-        }
-    )
+def detrend_timeseries(da):
+    """Remove each station's linear trend while preserving its midpoint level."""
+    out = da.copy()
+    times = pd.DatetimeIndex(pd.to_datetime(da["time"].values))
+    time_years = (times - times[0]).total_seconds() / (365.2425 * 24 * 3600)
+    center_year = np.nanmean(time_years)
+
+    for i in range(da.sizes["station"]):
+        values = da.values[i]
+        valid = np.isfinite(values)
+        if valid.sum() < 2:
+            continue
+        slope = np.polyfit(time_years[valid], values[valid], 1)[0]
+        out.values[i] = values - slope * (time_years - center_year)
+    return out
+
+
+def extremes_to_frame(da, extreme_ds, names):
+    """Flatten padded event indices to a tidy (station, t, value) frame."""
+    idx = extreme_ds["extreme_time_index"].values
+    values = da.values
+    times = da["time"].values
+
+    rows = []
+    for i, stat in enumerate(da["station"].values):
+        ev = idx[i][idx[i] >= 0]
+        rows.append(
+            pd.DataFrame(
+                {
+                    "station": stat,
+                    "name": names[stat],
+                    "t": times[ev],
+                    "value": values[i, ev],
+                }
+            )
+        )
+    df = pd.concat(rows, ignore_index=True)
     months = df["t"].dt.month
     # ENSO year runs Mar(y-1) -> Feb(y) and is labelled by its peak year.
     df["enso_year"] = (df["t"].dt.year + (months >= 3).astype(int)).astype(np.int16)
     return df
 
 
-def county_station_year(df):
-    """Per county / ENSO year / station mean of the event values."""
+def station_year(df):
+    """Mean and max of the event values per station / ENSO year."""
     return (
-        df.groupby(["county", "enso_year", "station"], observed=True)["value"]
-        .mean()
-        .rename("station_mean")
+        df.groupby(["station", "name", "enso_year"], observed=True)["value"]
+        .agg(year_mean="mean", year_max="max")
         .reset_index()
     )
 
 
-def county_yearly(df, per_station):
-    """County/ENSO-year aggregate: mean plus across-station and within-year spread."""
-    across_station = per_station.groupby(["county", "enso_year"], observed=True).agg(
-        mean=("station_mean", "mean"),
-        std_stations=("station_mean", "std"),
-        min_station=("station_mean", "min"),
-        max_station=("station_mean", "max"),
-        n_stations=("station_mean", "size"),
-    )
-
-    across_samples = df.groupby(["county", "enso_year"], observed=True).agg(
-        std_samples=("value", "std"),
-        n_samples=("value", "size"),
-    )
-
-    out = across_station.join(across_samples)
-    out.loc[out["n_stations"] < 2, "std_stations"] = np.nan
-    out.loc[out["n_samples"] < 2, "std_samples"] = np.nan
-    return out.sort_index()
+def station_event_counts(df, in_record, names):
+    """Count POT events for every coverage-qualified station / ENSO year."""
+    rows = []
+    for stat, years in in_record.items():
+        counts = df.loc[df["station"] == stat].groupby("enso_year").size()
+        for year in sorted(years):
+            rows.append(
+                {
+                    "station": stat,
+                    "name": names[stat],
+                    "enso_year": year,
+                    "event_count": counts.get(year, 0),
+                }
+            )
+    return pd.DataFrame(rows)
 
 
-def detrend_by_year(per_station):
-    """Remove each county's linear trend in ENSO year from the station means."""
-    out = per_station.copy()
+def record_enso_years(da, min_coverage=0.5):
+    """Which ENSO years have valid data coverage for each station?
 
-    def _fit(g):
-        annual = g.groupby("enso_year")["station_mean"].mean()
-        x = annual.index.to_numpy(dtype=float)
-        y = annual.to_numpy(dtype=float)
-        if len(x) < 3 or x.std() == 0:
-            return g["station_mean"]
-        slope = ((x - x.mean()) * (y - y.mean())).sum() / ((x - x.mean()) ** 2).sum()
-        return g["station_mean"] - slope * (
-            g["enso_year"].to_numpy(dtype=float) - x.mean()
+    An ENSO year is in the record when at least `min_coverage` of its hours have
+    finite observations at that station (same rule as ENSO_AnnualMax.py).
+    """
+    times = pd.DatetimeIndex(pd.to_datetime(da["time"].values))
+    enso_year = times.year + (times.month >= 3).astype(int)
+    expected_hours = 365 * 24
+    in_record = {}
+    for i, stat in enumerate(da["station"].values):
+        coverage = pd.Series(np.isfinite(da.values[i]), index=enso_year).groupby(level=0).sum()
+        in_record[stat] = sorted(
+            int(y) for y in coverage.index[coverage >= min_coverage * expected_hours]
         )
-
-    out["station_mean"] = (
-        out.groupby("county", observed=True, group_keys=False)
-        .apply(_fit, include_groups=False)
-        .reindex(out.index)
-    )
-    return out
+    return in_record
 
 
-def enso_violin_figure(per_station, label, units, fname):
-    """Per county: all-year station distribution followed by each El Nino year."""
-    if detrend_for_comparison:
-        per_station = detrend_by_year(per_station)
-
-    group_labels = ["Other years", "ENSO years"]
-    palette = dict(
-        zip(
-            group_labels, ["0.75", plt.rcParams["axes.prop_cycle"].by_key()["color"][0]]
-        )
-    )
-
-    other_years = per_station[~per_station["enso_year"].isin(enso_peak_years)].assign(
-        group=group_labels[0]
-    )
-    events = per_station[per_station["enso_year"].isin(enso_peak_years)].assign(
-        group=group_labels[1]
-    )
-    plot_df = pd.concat([other_years, events], ignore_index=True)
-    plot_df["group"] = pd.Categorical(plot_df["group"], categories=group_labels)
-
-    counties = sorted(per_station["county"].unique())
-    ncol = 3
-    nrow = int(np.ceil(len(counties) / ncol))
+def _grid(n, ncol=3, w=6.4, h=4.4):
+    """Return figure and axes for n subplots in a grid."""
+    nrow = int(np.ceil(n / ncol))
     fig, axes = plt.subplots(
-        nrow, ncol, figsize=(5.6 * ncol, 3.6 * nrow), sharex=True, sharey=True
+        nrow, ncol, figsize=(w * ncol, h * nrow), sharey=True, squeeze=False
     )
-    axes = np.atleast_1d(axes).ravel()
-
-    for ax, cname in zip(axes, counties):
-        sub = plot_df[plot_df["county"] == cname]
-        sns.violinplot(
-            data=sub,
-            x="group",
-            y="station_mean",
-            hue="group",
-            order=group_labels,
-            hue_order=group_labels,
-            palette=palette,
-            legend=False,
-            cut=0,
-            width=0.8,
-            density_norm="width",
-            inner="quartile",
-            linewidth=1.0,
-            ax=ax,
-        )
-        baseline = sub.loc[sub["group"] == group_labels[0], "station_mean"]
-        ax.axhline(float(baseline.median()), color="0.4", ls="--", lw=1.0, zorder=0)
-
-        # Empty ENSO years mean no POT exceedance, not missing data.
-        for pos, g in enumerate(group_labels):
-            if sub.loc[sub["group"] == g, "station_mean"].notna().sum() == 0:
-                ax.annotate(
-                    "n=0",
-                    (pos, 0.5),
-                    xycoords=("data", "axes fraction"),
-                    ha="center",
-                    va="center",
-                    fontsize=8,
-                    color="0.4",
-                    rotation=90,
-                )
-
-        ax.set_title(
-            f"{str(cname).title()} (n={sub['station'].nunique()} stations)",
-            fontsize=10,
-        )
-        ax.set_xlabel("")
-        ax.set_ylabel("")
-        # Ticks sit at the violin centres (categorical positions 0, 1, ...).
-        ax.set_xticks(range(len(group_labels)), group_labels)
-        ax.tick_params(axis="x", labelsize=9)
-        ax.grid(axis="y", alpha=0.3)
-        ax.set_xlim(-0.6, len(group_labels) - 0.4)
-
-    for ax in axes[len(counties) :]:
+    axes = axes.ravel()
+    for ax in axes[n:]:
         ax.set_visible(False)
+    return fig, axes
 
-    detrend_note = " (detrended)" if detrend_for_comparison else ""
-    fig.supylabel(f"ENSO-year mean {label} ({units}){detrend_note}")
-    fig.suptitle(
-        f"El Ni\u00f1o years vs. other years \u2014 {label} by county "
-        "(ENSO year = Mar\u2192Feb; violins span stations)"
+
+def yearly_stat_figure(
+    yearly, in_record, col, label, fname, y_label=None, title_label=None
+):
+    """Per station: distribution of all `col`, El Nino years as colored dots.
+    El Nino years inside the record with no POT event get an 'x' on the bottom axis.
+    """
+    stations = list(dict.fromkeys(yearly["station"]))
+    fig, axes = _grid(len(stations))
+    
+    # Define colors for each El Niño year
+    enso_colors = {1983: "#1f77b4", 1998: "#ff7f0e", 2016: "#2ca02c"}
+
+    for ax, stat in zip(axes, stations):
+        sub = yearly[yearly["station"] == stat]
+        other = sub[~sub["enso_year"].isin(enso_peak_years)]
+        enso = sub[sub["enso_year"].isin(enso_peak_years)]
+        
+        # Get station name for title
+        station_name = next((row["name"] for row in TG if row["station"] == stat), stat)
+
+        if len(other) > 1:
+            sns.violinplot(
+                y=other[col],
+                x=np.zeros(len(other)),
+                color="0.75",
+                cut=0,
+                inner=None,
+                linewidth=1.0,
+                ax=ax,
+            )
+            ax.axhline(other[col].median(), color="black", ls="--", lw=2.0)
+        
+        # Plot each El Niño year with a different color
+        missing_years = []
+        for enso_year in enso_peak_years:
+            enso_subset = enso[enso["enso_year"] == enso_year]
+            if len(enso_subset) > 0:
+                ax.scatter(
+                    np.zeros(len(enso_subset)),
+                    enso_subset[col],
+                    s=150,
+                    color=enso_colors[enso_year],
+                    edgecolors="white",
+                    linewidth=1.5,
+                    zorder=5,
+                )
+            elif enso_year in in_record.get(stat, []):
+                missing_years.append(enso_year)
+
+        # No event in these El Niño years; mark with 'x' at bottom, spread
+        # side to side. x in data coords, y in axes fraction (0 = bottom).
+        spacing = 0.12
+        offsets = (np.arange(len(missing_years)) - (len(missing_years) - 1) / 2) * spacing
+        for x_off, enso_year in zip(offsets, missing_years):
+            ax.scatter(
+                x_off,
+                0.04,
+                marker="x",
+                s=200,
+                color=enso_colors[enso_year],
+                linewidth=2,
+                zorder=5,
+                transform=ax.get_xaxis_transform(),
+                clip_on=False,
+            )
+
+        ax.set_ylabel("")
+        ax.set_xlabel("")
+        ax.set_xticks([])
+        ax.set_title(f"{station_name}, n={len(sub)} years", fontsize=26)
+        ax.tick_params(axis="y", labelsize=23)
+        ax.grid(True, axis="y", alpha=0.6, linewidth=1.0)
+
+    # Only show y-axis labels on bottom right subplot
+    bottom_left = (int(np.ceil(len(stations) / 3)) - 1) * 3
+    for i, ax in enumerate(axes[: len(stations)]):
+        ax.tick_params(axis="y", labelleft=(i == bottom_left))
+    
+    # Legend
+    legend_elements = [
+        Line2D([0], [0], marker="o", color="w", label=enso_year_labels[year],
+               markerfacecolor=enso_colors[year], markersize=11, markeredgecolor="white")
+        for year in enso_peak_years
+    ]
+    legend_elements.append(
+        Line2D([0], [0], marker="x", color="w", label="No POT events",
+               markeredgecolor="black", markersize=13, markeredgewidth=2)
     )
-    fig.tight_layout(rect=(0.02, 0, 1, 0.95))
+    
+    y_label = y_label or f"{label} POT water level (m)"
+    title_label = title_label or f"ENSO-year {label.lower()} of POT events"
+    fig.supylabel(f"{y_label}", fontsize=28, x=0.04)
+    fig.suptitle(
+        f"El Niño years vs. other years — {title_label}",
+        fontsize=34,
+    )
+    fig.legend(
+        handles=legend_elements,
+        loc="lower center",
+        ncol=len(legend_elements),
+        frameon=False,
+        fontsize=22,
+        bbox_to_anchor=(0.5, 0.0),
+    )
+    fig.tight_layout(rect=(0, 0.05, 1, 0.96))
     fig.savefig(os.path.join(dir_out, fname), dpi=200)
     plt.show()
-    return fig
 
 
 # ===============================================================================
-# Load Data
+# Load Data & Calculate Extremes
 # ===============================================================================
-county = gpd.read_file(county_in)
+names = {row["station"]: row["name"] for row in TG}
+da = load_tide_gauges(TG, dir_in, dt_start)
+if detrend_timeseries_before_pot:
+    da = detrend_timeseries(da)
 
-ext_wl = xr.open_dataset(extreme_wl_in)[["waterlevel", "lon", "lat"]]
-ext_wave = xr.open_dataset(extreme_wave_in)[["Hs", "lon", "lat"]]
+print("Calculating POT extremes...")
+_, extreme_ds = compute_return_intervals_forwardstop_map(
+    da,
+    RPs=RPs,
+    r=decluster_window,
+    l=30,
+    method="emp",
+    fitter_method="mle",
+    n_boot=200,
+    pct_low=pot_pct_low,
+    pct_high=pot_pct_high,
+    decluster=decluster_method,
+    return_extremes=True,
+)
 
-# ===============================================================================
-# County / ENSO-Year Aggregation
-# ===============================================================================
-print("Aggregating water level events...")
-wl_events = events_to_frame(ext_wl, "waterlevel", county, county_field, max_snap_deg)
-wl_station_year = county_station_year(wl_events)
-wl_yearly = county_yearly(wl_events, wl_station_year)
-
-print("Aggregating wave events...")
-wave_events = events_to_frame(ext_wave, "Hs", county, county_field, max_snap_deg)
-wave_station_year = county_station_year(wave_events)
-wave_yearly = county_yearly(wave_events, wave_station_year)
+events = extremes_to_frame(da, extreme_ds, names)
+yearly = station_year(events)
+in_record = record_enso_years(da, min_coverage=min_coverage)
+event_counts = station_event_counts(events, in_record, names)
 
 # ===============================================================================
 # Figures
 # ===============================================================================
-enso_violin_figure(
-    wl_station_year,
-    "extreme water level",
-    "m",
-    "ENSO_Stormyness_WL_Violin_Counties.png",
+yearly_stat_figure(
+    yearly, in_record, "year_mean", "Mean", "ENSO_Stormyness_WL_YearlyMean_Stations.png"
 )
-enso_violin_figure(
-    wave_station_year, "extreme Hs", "m", "ENSO_Stormyness_Hs_Violin_Counties.png"
+yearly_stat_figure(
+    yearly, in_record, "year_max", "Max", "ENSO_Stormyness_WL_YearlyMax_Stations.png"
+)
+yearly_stat_figure(
+    event_counts,
+    in_record,
+    "event_count",
+    "Number",
+    "ENSO_Stormyness_EventCount_Stations.png",
+    y_label="Number of POT events",
+    title_label="ENSO-year POT event counts",
 )

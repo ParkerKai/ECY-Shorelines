@@ -16,14 +16,14 @@ from matplotlib.lines import Line2D
 from xoa.plot import plot_rose
 
 # ----------------------------------------------------------------------------- user inputs
-STATION_ID = "46088"
+STATION_ID = "46029"
 DATA_DIR = Path(rf"D:\Data\Waves\buoys\ndbc\ndbc{STATION_ID}\BulkWaves")
 OUT_DIR = Path(
     r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Projects\ENSO\figures\Waves"
 )
 WINTER_MONTHS = [12, 1, 2]
 # winters are labelled by the year of their December, so 1982 means Dec 1982 - Feb 1983
-EL_NINO_WINTERS = [1982, 1997, 2015]
+EL_NINO_WINTERS = [ 2015]  # 1982, 1997,
 EL_NINO_COLORS = {1982: "#d55e00", 1997: "#0072b2", 2015: "#009e73"}
 MIN_COVERAGE = 0.5  # fraction of DJF hours with valid Hs, Tp and Dp required per winter
 HS_EDGES = [0, 1, 2, 3, 4, 6, 8]
@@ -89,8 +89,9 @@ def winter_stats(ds):
 
 
 def plot_wave_roses(periods, station_id):
-    fig = plt.figure(figsize=(10.5, 4.5))
-    fig.subplots_adjust(right=0.75, wspace=0.4)  # room for the legend
+    n = len(periods)
+    fig = plt.figure(figsize=(6.5, 4.5 * n))
+    fig.subplots_adjust(right=0.72, hspace=0.35)  # room for the legend
     roses = []
     for i, (label, sub) in enumerate(periods.items()):
         valid = (sub.Hs.notnull() & sub.Dp.notnull()).values
@@ -100,14 +101,21 @@ def plot_wave_roses(periods, station_id):
             edges=HS_EDGES,
             nsector=NSECTOR,
             fig=fig,
-            subplot=121 + i,
-            legend=i == 1,
+            subplot=n * 100 + 10 + i + 1,
+            legend=False,
         )
         rose.ax.set_title(label, wrap=True)
         roses.append(rose)
     rmax = max(r.ax.get_rmax() for r in roses)
     for r in roses:
         r.ax.set_rmax(rmax)
+    fig.legend(
+        *roses[0].ax.get_legend_handles_labels(),
+        title="Hs [m]",
+        loc="center left",
+        bbox_to_anchor=(0.74, 0.5),
+        frameon=False,
+    )
     fig.suptitle(
         f"NDBC {station_id} wave roses: Hs [m] vs peak direction (coming from)"
     )

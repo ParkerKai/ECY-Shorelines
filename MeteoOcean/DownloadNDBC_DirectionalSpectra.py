@@ -148,6 +148,25 @@ def download_mode(api, station_id, mode, years):
     return df[~df.index.duplicated(keep="first")].sort_index()
 
 
+def extract_lat_lon(location_str):
+    """Extract latitude and longitude from NDBC location string.
+    
+    Expected format: "48.332 N 123.179 W (..."
+    Returns: (lat, lon) as floats, or (None, None) if parsing fails.
+    """
+    try:
+        parts = location_str.split()
+        lat = float(parts[0])
+        if parts[1].upper() == 'S':
+            lat = -lat
+        lon = float(parts[2])
+        if parts[3].upper() == 'W':
+            lon = -lon
+        return lat, lon
+    except (IndexError, ValueError):
+        return None, None
+
+
 def main():
     if not VERIFY_SSL:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -157,6 +176,10 @@ def main():
     if not years:
         raise SystemExit(f"No historical spectral data listed for station {STATION_ID}")
     print(f"Station {STATION_ID}: data listed for {years[0]}-{years[-1]}")
+
+    # Fetch station metadata
+    station_meta = api.station(station_id=STATION_ID)
+    lat, lon = extract_lat_lon(station_meta.get("Location", ""))
 
     frames = {}
     for mode in MODES:
@@ -194,6 +217,8 @@ def main():
             df.reindex(index=times, columns=freqs).to_numpy(np.float32),
             attrs,
         )
+    
+    # Build global attributes with station metadata
     ds.attrs = {
         "title": f"NDBC station {STATION_ID} directional wave spectra",
         "station_id": STATION_ID,
@@ -204,6 +229,18 @@ def main():
         ),
         "history": f"Created {utcnow():%Y-%m-%d %H:%M} UTC by DownloadNDBC_DirectionalSpectra.py",
     }
+    
+    # Add latitude and longitude if available
+    if lat is not None:
+        ds.attrs["latitude"] = lat
+    if lon is not None:
+        ds.attrs["longitude"] = lon
+    
+    # Add all other station metadata
+    for key, value in station_meta.items():
+        if key != "Location":  # Skip Location since we already extracted lat/lon
+            attr_name = key.lower().replace(" ", "_")
+            ds.attrs[attr_name] = value
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out_file = (

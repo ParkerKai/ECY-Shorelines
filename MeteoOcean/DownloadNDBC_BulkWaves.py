@@ -135,6 +135,25 @@ def download_stdmet(api, station_id, years):
     return df.dropna(how="all")
 
 
+def extract_lat_lon(location_str):
+    """Extract latitude and longitude from NDBC location string.
+    
+    Expected format: "48.332 N 123.179 W (..."
+    Returns: (lat, lon) as floats, or (None, None) if parsing fails.
+    """
+    try:
+        parts = location_str.split()
+        lat = float(parts[0])
+        if parts[1].upper() == 'S':
+            lat = -lat
+        lon = float(parts[2])
+        if parts[3].upper() == 'W':
+            lon = -lon
+        return lat, lon
+    except (IndexError, ValueError):
+        return None, None
+
+
 def main():
     if not VERIFY_SSL:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -145,6 +164,10 @@ def main():
         raise SystemExit(f"No historical stdmet data listed for station {STATION_ID}")
     print(f"Station {STATION_ID}: data listed for {years[0]}-{years[-1]}")
 
+    # Fetch station metadata
+    station_meta = api.station(station_id=STATION_ID)
+    lat, lon = extract_lat_lon(station_meta.get("Location", ""))
+
     print("Downloading stdmet ...")
     df = download_stdmet(api, STATION_ID, years)
     if df is None or df.empty:
@@ -154,12 +177,26 @@ def main():
     ds = xr.Dataset(coords={"time": times})
     for col, (name, _, attrs) in WAVE_VARS.items():
         ds[name] = ("time", df[col].to_numpy(np.float32), {**attrs, "ndbc_name": col})
+    
+    # Build global attributes with station metadata
     ds.attrs = {
         "title": f"NDBC station {STATION_ID} bulk wave parameters",
         "station_id": STATION_ID,
         "source": "NOAA National Data Buoy Center (https://www.ndbc.noaa.gov), via ndbc-api",
         "history": f"Created {utcnow():%Y-%m-%d %H:%M} UTC by DownloadNDBC_BulkWaves.py",
     }
+    
+    # Add latitude and longitude if available
+    if lat is not None:
+        ds.attrs["latitude"] = lat
+    if lon is not None:
+        ds.attrs["longitude"] = lon
+    
+    # Add all other station metadata
+    for key, value in station_meta.items():
+        if key != "Location":  # Skip Location since we already extracted lat/lon
+            attr_name = key.lower().replace(" ", "_")
+            ds.attrs[attr_name] = value
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out_file = (

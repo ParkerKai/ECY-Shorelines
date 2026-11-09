@@ -27,7 +27,7 @@ from matplotlib.lines import Line2D
 
 from BuildWaterMaskIndex import INDEX_GPKG, TILE_LAYER, is_skipped_scan
 
-REGION_NAME = "thurston"
+REGION_NAME = "king"
 
 PROFILE_DIR = Path(r"D:\Data\Lidar\county_change") / REGION_NAME / "profiles"
 
@@ -46,8 +46,8 @@ TIDAL_DATUM_GPKG = (
 TIDAL_DATUM_LAYER = "transect_bases_tidal_datums"
 
 # Transect to plot, matching the id columns carried through from the transects.
-PATH_ID = 0
-SAMPLE_ID = 40186
+PATH_ID = 1
+SAMPLE_ID = 34328
 
 # None = show the figure interactively, otherwise a directory to save a PNG in.
 OUT_DIR = r"N:\SEA\Kai\Figures\LIdar\TransectPlots"

@@ -6,21 +6,15 @@ The script has been updated to include ERA5 modeled wave spectra data alongside 
 ## Changes Made
 
 ### 1. **Data Loading**
-- Added `load_era5_station()` function to load ERA5 spectral netCDF files from `E:\ERA5_Waves\PNW_Era5Spectral`
-- Automatically extracts data at the nearest grid point to the NDBC station using coordinates from NDBC metadata
-- Handles time coordinate renaming (`valid_time` → `time` for consistency)
-- Resamples to hourly data to match NDBC frequency
+- `load_era5_station()` reads only the DJF monthly files for the El Ni?o winters that the buoy also observed
+- For each file, the grid point nearest to the buoy (lat/lon from the NDBC file attributes) is selected **before** loading, so only that column is read from disk (a full monthly file is ~4.5 GB in memory)
+- Decodes `d2fd`: values are log10(E), so E = 10**d2fd with missing (zero-energy) bins set to 0
+- `frequencyNumber`/`directionNumber` are bin indices: f = 0.03453?1.1^(n-1) Hz, ? = 7.5? + 15??(n-1)
+- ERA5 directions are "going to"; they are rotated 180? to "coming from" to match NDBC
 
 ### 2. **Spectral Analysis Functions**
-Added ERA5-specific functions:
-- `fourier_coefficients_era5()`: Computes directional Fourier coefficients (a1, b1, a2, b2) from ERA5 2D directional spectrum (d2fd)
-- `mean_spectra_era5()`: Computes mean spectra for specified periods (all winters, El Niño winters)
-- `bulk_parameters_era5()`: Extracts bulk parameters (Hs, Tp, Dp) from ERA5 2D spectrum
-
-### 3. **Plotting Updates**
-- `plot_directional_spectra()`: Now handles up to 4 subplots (2x2 grid) for NDBC all/El Niño + ERA5 El Niño
-- `plot_frequency_spectra()`: Updated to handle 3+ spectral datasets with different colors
-- Both functions now handle flexible frequency dimension names (`frequency` or `frequencyNumber`)
+- `mean_spectra_era5()`: time-mean E(f, ?) and S(f) = ?E d?
+- `bulk_parameters_era5()`: Hs, Tp and peak direction (mean direction at the peak frequency, as for NDBC alpha1)
 
 ### 3. **Output Figures**
 
@@ -38,7 +32,10 @@ Added ERA5-specific functions:
 **Figure 3 - Frequency & Directional Spectra** (2 line plots):
 - Frequency spectrum: S(f) vs period
 - Directional spectrum: D(θ) vs direction
-- Both show all available datasets (NDBC obs and ERA5 model)
+- Solid lines = ERA5 model, dotted lines = NDBC buoy
+- Black = all winters (ERA5 line uses every complete DJF winter in the archive, 1940–2025)
+- One coloured line per El Niño winter (not averaged); ERA5 lines appear for every
+  El Niño winter, buoy lines only for winters inside the buoy record
 
 ## Data Structure
 
@@ -88,10 +85,13 @@ All files saved to `OUT_DIR`:
 2. **station46088_waverose_winter_elnino.png** - 3-panel wave rose comparison
 3. **station46088_dirspec_winter_elnino.png** - Polar directional spectrum plots
 4. **station46088_freqspec_winter_elnino.png** - Frequency and directional spectra
+5. **era5_station46088_DJF_mean_spectra_by_winter.nc** - Cache of per-winter ERA5 mean
+   spectra at the station. The first run builds it (~17 min, ~255 monthly files); later
+   runs only compute winters that are missing. Delete it to force a rebuild.
 
 ## Notes
 
-- The script loads full monthly ERA5 files; for large date ranges this may take several minutes
+- ERA5 loading takes ~4 s per monthly file (only the station point is read)
 - NaN handling is built in for missing data periods
 - Station location is automatically extracted from NDBC metadata attributes
 - All times are kept in UTC (xarray time handling)

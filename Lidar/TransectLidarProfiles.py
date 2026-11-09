@@ -20,6 +20,7 @@ from shapely import get_coordinates, line_interpolate_point
 
 from BuildWaterMaskIndex import check_mask_coverage
 
+
 INDEX_GPKG = Path(r"D:\Data\Lidar\lidar_tile_index_dtm.gpkg")
 TILE_LAYER = "tiles"
 SCAN_LAYER = "scans"

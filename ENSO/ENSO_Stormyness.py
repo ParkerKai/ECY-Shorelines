@@ -63,7 +63,7 @@ decluster_window = "72h"
 # successive high tides chain into multi-month clusters at tidal-range thresholds.
 decluster_method = "peaks"
 # ForwardStop threshold search band (percentiles of hourly water level)
-pot_pct_low = 99.6
+pot_pct_low = 99.5
 pot_pct_high = 99.9
 
 # El Nino peak years; each ENSO year runs Mar(year-1) -> Feb(year)

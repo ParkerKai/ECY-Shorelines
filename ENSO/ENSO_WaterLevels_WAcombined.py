@@ -336,12 +336,18 @@ def parse_meiv2(
 # ===============================================================================
 dir_in = r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\TideGauge\Hourly"
 dir_enso = r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\ENSO"
-dir_out = r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Projects\RSLR\figures"
+dir_out = r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Projects\ENSO\figures"
 os.makedirs(dir_out, exist_ok=True)
 
 # Monthly aggregation method
 agg_method = "lowpass"  # Options: 'mean', 'lowpass'
 
+
+# Units for the plots (data are in meters): 'm', 'cm', or 'in'
+units = "in"
+unit_scale = {"m": 1.0, "cm": 100.0, "in": 1.0 / 0.0254}
+if units not in unit_scale:
+    raise ValueError("units must be 'm', 'cm', or 'in'.")
 
 # Record Length Trim (cut records to being within certain dates)
 dt_start = None  # pd.Timestamp("1992-01-01")  or none
@@ -408,9 +414,9 @@ for cnt, row in enumerate(TG_table.iterrows()):
         print(f"Trimming data from station {stat} to specified {dt_start}")
         df = df.loc[pd.Timestamp(dt_start) :]
 
-    # Convert from meters to centimeters.
-    df["v_obs"] = df["v_obs"] * 100  # Convert from meters to centimeters
-    df["v_pred"] = df["v_pred"] * 100  # Convert from meters to centimeters
+    # Convert from meters to the selected units.
+    df["v_obs"] = df["v_obs"] * unit_scale[units]
+    df["v_pred"] = df["v_pred"] * unit_scale[units]
 
     # ---- Aggregation ----
     if agg_method == "mean":
@@ -635,7 +641,7 @@ for ax, (gname, gs) in zip(axes, group_series.items()):
     ax.set_title(f"{gname} (n={len(groups[gname])} gauges)")
     ax.grid(alpha=0.3)
 
-fig.supylabel("Monthly mean water level (cm)")
+fig.supylabel(f"Monthly mean water level ({units})")
 axes[-1].set_xlabel("Month (March \u2192 March)")
 handles, labels = axes[0].get_legend_handles_labels()
 fig.legend(
@@ -703,7 +709,7 @@ for gname, gs in group_series.items():
     ax_series.plot(x, seasonal_mean, "k--", lw=2.5, label="Mean seasonal cycle")
     ax_series.fill_between(x, seasonal_min, seasonal_max, color="k", alpha=0.12, lw=0)
     ax_series.axhline(0, color="0.6", lw=0.8)
-    ax_series.set_ylabel("Monthly mean water level (cm)")
+    ax_series.set_ylabel(f"Monthly mean water level ({units})")
     ax_series.set_title(f"{gname} (n={len(groups[gname])} gauges)")
     ax_series.grid(alpha=0.3)
     ax_series.legend(frameon=False, ncol=3)
@@ -742,7 +748,7 @@ for gname, gs in group_series.items():
             )
 
     ax_difference.axhline(0, color="0.2", lw=0.9)
-    ax_difference.set_ylabel("El Ni\u00f1o mean \u2212 seasonal cycle (cm)")
+    ax_difference.set_ylabel(f"El Ni\u00f1o mean \u2212 seasonal cycle ({units})")
     ax_difference.set_xlabel("Month (March \u2192 March)")
     ax_difference.set_title("Mean El Ni\u00f1o departure (Bounds = event min\u2013max)")
     ax_difference.set_xticks(x)

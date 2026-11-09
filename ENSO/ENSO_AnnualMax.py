@@ -55,7 +55,11 @@ enso_colors = {
     1983: "#d55e00",
     1998: "#0072b2",
     2016: "#009e73",
+    2023: "#840E94",
 }
+
+# Units for the plot
+units = "ft"  # meters (or 'ft' for feet)
 
 
 # ===============================================================================
@@ -201,9 +205,9 @@ def annual_max_figure(yearly, fname):
     for i, ax in enumerate(axes[: len(stations)]):
         ax.tick_params(axis="y", labelleft=(i == bottom_left))
     fig.supylabel(
-        f"March-February annual maximum water level (m)",
+        f"March-February annual maximum water level ({units})",
         fontsize=28,
-        x=0.04,
+        x=0.03,
     )
     fig.suptitle(
         "El Nino years vs. all years - March-February annual maxima", fontsize=34
@@ -223,11 +227,14 @@ def annual_max_difference_figure(yearly, fname):
     """Boxplot annual maximum minus mean annual maximum, with ENSO dots."""
     stations = list(dict.fromkeys(yearly["station"]))
     fig, axes = _grid(len(stations))
+    # Differences are shown in inches when working in feet.
+    diff_units = "in" if units == "ft" else units
+    diff_scale = 12 if units == "ft" else 1
 
     for ax, stat in zip(axes, stations):
         sub = yearly[yearly["station"] == stat]
         ax.boxplot(
-            sub["max_minus_mean"],
+            sub["max_minus_mean"] * diff_scale,
             positions=[0],
             widths=0.5,
             whis=(0, 100),
@@ -244,7 +251,7 @@ def annual_max_difference_figure(yearly, fname):
             selected = enso[enso["enso_year"] == year]
             ax.scatter(
                 np.zeros(len(selected)),
-                selected["max_minus_mean"],
+                selected["max_minus_mean"] * diff_scale,
                 color=enso_colors[year],
                 edgecolor="white",
                 zorder=3,
@@ -263,7 +270,7 @@ def annual_max_difference_figure(yearly, fname):
     for i, ax in enumerate(axes[: len(stations)]):
         ax.tick_params(axis="y", labelleft=(i == bottom_left))
     fig.supylabel(
-        f"Annual maximum difference from mean (m)",
+        f"Annual maximum difference from mean ({diff_units})",
         fontsize=28,
         x=0.04,
     )
@@ -286,6 +293,13 @@ def annual_max_difference_figure(yearly, fname):
 # Load Data, Calculate Maxima, and Plot
 # ===============================================================================
 da = load_tide_gauges(TG, dir_in, dt_start)
+
+
+if units == "ft":
+    da = da * 3.28084  # convert meters to feet
+elif units != "m":
+    raise ValueError("Invalid units specified. Use 'm' or 'ft'.")
+
 if detrend_before_annual_max:
     da = detrend_timeseries(da)
 yearly_max = annual_maxima(da, min_coverage=min_coverage)

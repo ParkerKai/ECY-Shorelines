@@ -67,6 +67,7 @@ REGION_NAME = MODE_CONFIG["region_name"]
 TRANSECT_GPKG = MODE_CONFIG["transect_root"] / REGION_NAME / "transects.gpkg"
 
 TRANSECT_LAYER = "transects_all"
+
 # Columns that uniquely identify a transect; carried through to the output.
 TRANSECT_ID_COLS = ["path_id", "sample_id"]
 

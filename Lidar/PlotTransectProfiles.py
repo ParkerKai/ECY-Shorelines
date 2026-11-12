@@ -26,8 +26,9 @@ import pyarrow.parquet as pq
 from matplotlib.lines import Line2D
 
 from BuildWaterMaskIndex import INDEX_GPKG, TILE_LAYER, is_skipped_scan
+from TransectShorelineChange import shoreline_paths
 
-REGION_NAME = "king"
+REGION_NAME = "island"
 
 PROFILE_DIR = Path(r"D:\Data\Lidar\county_change") / REGION_NAME / "profiles"
 
@@ -46,8 +47,8 @@ TIDAL_DATUM_GPKG = (
 TIDAL_DATUM_LAYER = "transect_bases_tidal_datums"
 
 # Transect to plot, matching the id columns carried through from the transects.
-PATH_ID = 1
-SAMPLE_ID = 34328
+PATH_ID = 14
+SAMPLE_ID = 145330
 
 # None = show the figure interactively, otherwise a directory to save a PNG in.
 OUT_DIR = r"N:\SEA\Kai\Figures\LIdar\TransectPlots"
@@ -59,15 +60,8 @@ SHOW_WATER_PLANE = True
 SHOW_MASK_DIAGNOSTICS = True
 
 # Datum whose contour position is tracked through time: "MLLW", "LMSL" or "MHHW".
+# Crossings and the trend are read from TransectShorelineChange.py output for this datum.
 CROSSING_DATUM = "MHHW"
-# Transects extend 150 m landward and seaward of the shoreline, so the shoreline is at 150 m.
-SHORELINE_DIST_M = 150.0
-POINT_SIGMA_Z_M = (
-    0.20 / 1.96
-)  # 1-sigma vertical lidar uncertainty (20 cm is the 95% CI)
-SLOPE_WINDOW_M = (
-    2.0  # half-width of the window used for the local beach slope at a crossing
-)
 
 # Trailing 4-digit year in the scan folder name, used for ordering and colour.
 YEAR_PATTERN = re.compile(r"(\d{4})")
@@ -150,9 +144,7 @@ def load_tile_planes(profiles):
 
     # Assumes the profile x/y share the CRS of the transect layers in this GeoPackage.
     crs = pyogrio.read_info(TIDAL_DATUM_GPKG, layer=TIDAL_DATUM_LAYER)["crs"]
-    points = gpd.GeoSeries(
-        gpd.points_from_xy(profiles["x"], profiles["y"]), crs=crs
-    )
+    points = gpd.GeoSeries(gpd.points_from_xy(profiles["x"], profiles["y"]), crs=crs)
     index_crs = pyogrio.read_info(INDEX_GPKG, layer=TILE_LAYER)["crs"]
     points = points.to_crs(index_crs)
     footprints = gpd.read_file(
@@ -204,35 +196,6 @@ def mask_transitions(dist, wet):
     """dist_m midway between each pair of adjacent samples where wet flips."""
     flip = np.flatnonzero(wet[:-1] != wet[1:])
     return (dist[flip] + dist[flip + 1]) / 2
-
-
-def seaward_crossing(dist, z, wet, level):
-    """dist_m of the crossing of `level` closest to SHORELINE_DIST_M, linearly interpolated.
-    
-    Note: wet flag is NOT applied here because datum crossings may occur at elevations
-    where the water mask is active. The water mask is designed to account for tidal
-    differences in satellite imagery, not to exclude data from topographic analysis.
-    """
-    d = z - level
-    d0, d1 = d[:-1], d[1:]
-    # Only adjacent valid samples, so crossings are never interpolated across gaps.
-    hit = np.isfinite(d0) & np.isfinite(d1) & ((d0 == 0) | (np.sign(d0) != np.sign(d1)))
-    idx = np.flatnonzero(hit)
-    if idx.size == 0:
-        return np.nan
-    t = np.divide(
-        d0[idx], d0[idx] - d1[idx], out=np.zeros(idx.size), where=d0[idx] != 0
-    )
-    xs = dist[idx] + t * (dist[idx + 1] - dist[idx])
-    return xs[np.argmin(np.abs(xs - SHORELINE_DIST_M))]
-
-
-def local_slope(dist, z, wet, x0, window):
-    """Dry beach slope (m/m) by least squares within +/- window m of x0."""
-    ok = ~wet & np.isfinite(z) & (np.abs(dist - x0) <= window)
-    if ok.sum() < 3:
-        return np.nan
-    return np.polyfit(dist[ok], z[ok], 1)[0]
 
 
 #################### Main ######################
@@ -360,98 +323,66 @@ ax.set_xlim(50, 200)
 
 fig.tight_layout()
 
-# Datum contour position through time.
+# Datum contour position through time, from TransectShorelineChange.py.
 fig2 = None
-if datums is not None:
-    level = dict(zip(["MLLW", "LMSL", "MHHW"], datums))[CROSSING_DATUM]
-    rows = []
-    for scan in scans:
-        year = scan_year(scan)
-        if year is None:
-            continue
-        p = profiles[profiles["scan"] == scan]
-        x = seaward_crossing(
-            p["dist_m"].to_numpy(), p["z"].to_numpy(), p["water"].to_numpy(), level
-        )
-        if np.isfinite(x):
-            beach_slope = local_slope(
-                p["dist_m"].to_numpy(float),
-                p["z"].to_numpy(float),
-                p["water"].to_numpy(bool),
-                x,
-                SLOPE_WINDOW_M,
-            )
-            rows.append(
-                {
-                    "scan": scan,
-                    "year": year + 0.5,
-                    "dist_m": x,
-                    "beach_slope": beach_slope,
-                    "sigma_x_m": POINT_SIGMA_Z_M / abs(beach_slope)
-                    if np.isfinite(beach_slope) and beach_slope != 0
-                    else np.nan,
-                }
-            )
-    crossings = pd.DataFrame(rows)
-    print(f"\n{CROSSING_DATUM} ({level:+.2f} m) crossings:")
+paths = shoreline_paths(REGION_NAME, CROSSING_DATUM)
+if not paths["rates"].exists():
+    print(f"WARNING: {paths['rates']} not found; run TransectShorelineChange.py")
+else:
+    key = [("path_id", "==", PATH_ID), ("sample_id", "==", SAMPLE_ID)]
+    crossings = pd.read_parquet(paths["crossings"], filters=key).sort_values("year")
+    rates = pd.read_parquet(paths["rates"], filters=key)
+    level = (
+        f" ({dict(zip(['MLLW', 'LMSL', 'MHHW'], datums))[CROSSING_DATUM]:+.2f} m NAVD88)"
+        if datums is not None
+        else ""
+    )
+    print(f"\n{CROSSING_DATUM}{level} crossings:")
     print(crossings.to_string(index=False) if not crossings.empty else "  none")
 
-    if len(crossings) >= 2 and crossings["sigma_x_m"].isna().any():
-        print("Dropping crossings without a usable local beach slope")
-        crossings = crossings.dropna(subset=["sigma_x_m"])
-
-    if len(crossings) >= 2:
-        from scipy import stats
-
-        x = crossings["year"].to_numpy(float)
-        y = crossings["dist_m"].to_numpy(float)
-        sig = crossings["sigma_x_m"].to_numpy(float)
-        n = len(x)
-        w = 1 / sig**2
-
-        # Weighted fit; each point's horizontal sigma = vertical sigma / beach slope.
-        # The variance is scaled by reduced chi-square (when > 1) so scatter beyond
-        # the propagated measurement error also widens the interval.
-        slope, intercept = np.polyfit(x, y, 1, w=np.sqrt(w))
-        xw = np.sum(w * x) / np.sum(w)
-        sxx = np.sum(w * (x - xw) ** 2)
-        dof = n - 2
-        chi2_red = (
-            np.sum(w * (y - (slope * x + intercept)) ** 2) / dof if dof > 0 else 1.0
-        )
-        scale = max(1.0, chi2_red)
-        slope_se = np.sqrt(scale / sxx)
-        tcrit = stats.t.ppf(0.975, dof) if dof > 0 else 1.96
-        slope_ci = tcrit * slope_se
+    fit = crossings.dropna(subset=["sigma_x_m"])
+    if rates.empty:
+        print("No trend for this transect (fewer than 2 usable crossings)")
+    else:
+        r = rates.iloc[0]
+        x = fit["year"].to_numpy(float)
+        y = fit["dist_m"].to_numpy(float)
 
         xs = np.linspace(x.min(), x.max(), 100)
-        band_se = np.sqrt(scale * (1 / np.sum(w) + (xs - xw) ** 2 / sxx))
+        trend = r["trend_m_yr"] * xs + r["fit_intercept"]
+        band = r["fit_tcrit"] * np.sqrt(
+            r["fit_scale"]
+            * (1 / r["fit_sum_w"] + (xs - r["fit_year_mean"]) ** 2 / r["fit_sxx"])
+        )
 
         fig2, ax2 = plt.subplots(figsize=(8, 6))
         ax2.fill_between(
             xs,
-            slope * xs + intercept - tcrit * band_se,
-            slope * xs + intercept + tcrit * band_se,
+            trend - band,
+            trend + band,
             alpha=0.2,
             color="C0",
             label="95% CI of trend",
         )
-        ax2.plot(xs, slope * xs + intercept, color="C0")
+        ax2.plot(xs, trend, color="C0")
         ax2.errorbar(
             x,
             y,
-            yerr=1.96 * sig,
+            yerr=[
+                y - fit["bar_lower_m"].to_numpy(float),
+                fit["bar_upper_m"].to_numpy(float) - y,
+            ],
             fmt="o",
             color="C0",
             capsize=3,
-            label="Crossing (95% CI from vertical error)",
+            label="Crossing (95% CI from scan bias and RMSE)",
         )
-        change = "Erosion" if slope > 0 else "Accretion"
+        change = "Erosion" if r["rate_m_yr"] < 0 else "Accretion"
         ax2.text(
             0.02,
             0.97,
-            f"Shoreline Change = {abs(slope) * 100:.0f} ± {slope_ci * 100:.0f} cm/yr "
-            f"{change}\n(95% CI, n={n})",
+            f"Shoreline Change = {abs(r['rate_m_yr']) * 100:.0f} ± "
+            f"{r['ci95_m_yr'] * 100:.0f} cm/yr {change}\n(95% CI, n={int(r['n'])})",
             transform=ax2.transAxes,
             va="top",
             bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "0.7"},
@@ -461,14 +392,11 @@ if datums is not None:
         ax2.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.0f}"))
         ax2.set_ylabel(f"Distance along transect of {CROSSING_DATUM} (m)")
         ax2.set_title(
-            f"{CROSSING_DATUM} ({level:+.2f} m NAVD88) position, "
-            f"path_id={PATH_ID}, sample_id={SAMPLE_ID}"
+            f"{CROSSING_DATUM}{level} position, path_id={PATH_ID}, sample_id={SAMPLE_ID}"
         )
         ax2.grid(alpha=0.3)
         ax2.legend(loc="lower right")
         fig2.tight_layout()
-    else:
-        print("Fewer than 2 crossings, skipping regression plot")
 
 if OUT_DIR is None:
     plt.show()
@@ -480,7 +408,8 @@ else:
     print(f"Wrote {out_path}")
     if fig2 is not None:
         out_path = (
-            out_dir / f"transect_{REGION_NAME}_{PATH_ID}_{SAMPLE_ID}_{CROSSING_DATUM}_trend.png"
+            out_dir
+            / f"transect_{REGION_NAME}_{PATH_ID}_{SAMPLE_ID}_{CROSSING_DATUM}_trend.png"
         )
         fig2.savefig(out_path, dpi=150)
         print(f"Wrote {out_path}")

@@ -63,8 +63,13 @@ decluster_window = "72h"
 # successive high tides chain into multi-month clusters at tidal-range thresholds.
 decluster_method = "peaks"
 # ForwardStop threshold search band (percentiles of hourly water level)
-pot_pct_low = 99.5
+pot_pct_low = 99
 pot_pct_high = 99.9
+
+# Declustered exceedances per year at the highest/lowest tested threshold.
+# When set, these override pot_pct_low/pot_pct_high (set both to None to disable).
+pot_exceed_per_year_min = 1
+pot_exceed_per_year_max = 7
 
 # El Nino peak years; each ENSO year runs Mar(year-1) -> Feb(year)
 enso_peak_years = [1983, 1998, 2016]
@@ -321,12 +326,14 @@ _, extreme_ds = compute_return_intervals_forwardstop_map(
     da,
     RPs=RPs,
     r=decluster_window,
-    l=30,
+    l=150,
     method="emp",
     fitter_method="mle",
     n_boot=200,
     pct_low=pot_pct_low,
     pct_high=pot_pct_high,
+    exceed_per_year_min=pot_exceed_per_year_min,
+    exceed_per_year_max=pot_exceed_per_year_max,
     decluster=decluster_method,
     return_extremes=True,
 )

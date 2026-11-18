@@ -48,12 +48,12 @@ MODE_CONFIGS = {
         "transect_root": Path(
             r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\Counties"
         ),
-        "output_root": Path(r"D:\Data\Lidar\county_change"),
+        "output_root": Path(r"N:\SEA\Kai\Data\lidar\county_change"),
     },
     "outer": {
         "region_name": "grays_harbor",
         "transect_root": Path(r"N:\SEA\Kai\Data\BarriersToMigration\counties_Outer"),
-        "output_root": Path(r"D:\Data\Lidar\county_change_outer"),
+        "output_root": Path(r"N:\SEA\Kai\Data\lidar\county_change"),
     },
 }
 

@@ -23,6 +23,7 @@ __email__ = "kaip461@ecy.wa.gov"
 import os
 import logging
 import numpy as np
+import pandas as pd
 import xarray as xr
 from glob import glob
 import sys
@@ -49,12 +50,12 @@ except ImportError as e:
 # ===============================================================================
 # User Inputs
 # ===============================================================================
-dir_in = r"N:\SEA\Kai\Data\Cosmos\WaterLevels\WaterLevels_Combined_000"
+dir_in = r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\WLs\WaterLevels\WaterLevels_Combined_000"
 dir_out = r"N:\SEA\Kai\Data\SLR_Atlas"
 
 N_WORKERS = 8
 
-RPs = np.array([1, 5, 10, 25, 50, 100])
+RPs = np.array([1, 5, 10, 20, 50, 100])
 EXPORT_EXTREME_DATASET = True
 
 
@@ -79,6 +80,51 @@ def _slice_at_extreme_indices(ds, extreme_indices_ds):
             selected["time"].attrs.pop(attr, None)
 
     return selected
+
+
+# Shapefile (DBF) field names are limited to 10 characters
+RL_COLUMN_PREFIXES = {
+    "return_level_emp": "RL_Emp",
+    "return_level_gpd": "RL_GPD",
+}
+STATION_COLUMN_NAMES = {
+    "threshold_flag": "threshflag",
+    "pot_threshold": "POT_thresh",
+    "events_per_year": "events_yr",
+    "reason_code": "reason",
+}
+
+
+def _rp_label(rp):
+    return f"{float(rp):g}".replace(".", "p")
+
+
+def _to_wide_dataframe(ds):
+    """One row per station, with a separate column per return period (e.g. RL_GPD_100)."""
+    station_df = (
+        ds.drop_dims("rp")
+        .to_dataframe()
+        .reset_index()
+        .rename(columns=STATION_COLUMN_NAMES)
+    )
+
+    rl_frames = []
+    for var, prefix in RL_COLUMN_PREFIXES.items():
+        rl = ds[var].transpose("station", "rp")
+        rl_frames.append(
+            pd.DataFrame(
+                rl.values,
+                columns=[f"{prefix}_{_rp_label(rp)}" for rp in rl["rp"].values],
+            )
+        )
+
+    wide_df = pd.concat([station_df] + rl_frames, axis=1)
+
+    long_names = [c for c in wide_df.columns if len(str(c)) > 10]
+    if long_names:
+        print(f"Warning: these column names will be truncated in the shapefile: {long_names}")
+
+    return wide_df
 
 
 # ===============================================================================
@@ -117,11 +163,15 @@ def main():
                 da,
                 RPs=RPs,
                 r="72h",
-                l=30,
+                l=100,
                 method="both",
                 fitter_method="mle",
                 n_boot=200,
                 return_extremes=EXPORT_EXTREME_DATASET,
+                pct_low= 97.5,
+                pct_high= 99.95,
+                exceed_per_year_min = 1,
+                exceed_per_year_max = 10,
             )
             if EXPORT_EXTREME_DATASET:
                 results, extreme_indices = computed
@@ -174,7 +224,7 @@ def main():
     # ===============================================================================
 
     # Build GeoDataFrame from final_ds (point geometry from lon/lat)
-    final_df = final_ds.to_dataframe().reset_index()
+    final_df = _to_wide_dataframe(final_ds)
     gdf = gpd.GeoDataFrame(
         final_df,
         geometry=gpd.points_from_xy(final_df["lon"], final_df["lat"]),

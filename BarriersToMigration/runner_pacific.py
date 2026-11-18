@@ -22,6 +22,7 @@ import logging
 import os
 
 from config import BarrierConfig, LayerSpec
+from helpers import layer_spec_exists
 from part1_trim import trim_and_export
 from part2_transects import generate_transects
 from part3_barriers import find_barriers_and_export
@@ -33,10 +34,10 @@ from part5_habitats import discover_wetland_layers, tag_habitat_intersections_an
 # ---------------------------
 
 county_list = [
-#   "clallam",
-#   "jefferson",
-#   "grays_harbor",
-#   "kitsap",
+   "clallam",
+   "jefferson",
+   "grays_harbor",
+   "kitsap",
    "pacific",
    "wahkiakum",
 ]
@@ -204,6 +205,9 @@ for county in county_list:
     # Habitat layers (Part 5)
     # ---------------------------
     habitat_dir = r"D:\Data\Habitat"
+    shorezone_gdb = os.path.join(
+        habitat_dir, "state_DNR_ShoreZone", "shorezone_themes.gdb"
+    )
     HABITAT_LAYERS: dict[str, LayerSpec] = {
         "shellfish_growing": LayerSpec(
             path=os.path.join(
@@ -229,6 +233,18 @@ for county in county_list:
             path=os.path.join(habitat_dir, "Forage fish", "Smelt_Spawning.shp"),
             kind="line",
         ),
+        "natal_estuary": LayerSpec(
+            path=os.path.join(
+                habitat_dir, "pocket & natal estuaries", "NatalEstuary.shp"
+            ),
+            kind="polygon",
+        ),
+        "pocket_estuaries": LayerSpec(
+            path=os.path.join(
+                habitat_dir, "pocket & natal estuaries", "PocketEstuaries.shp"
+            ),
+            kind="polygon",
+        ),
         "recreational_shellfish": LayerSpec(
             path=os.path.join(habitat_dir, "recreational shellfish", "beaches.shp"),
             kind="line",
@@ -241,13 +257,29 @@ for county in county_list:
             path=os.path.join(habitat_dir, "seal haul-out", "sealion_haulout.shp"),
             kind="polygon",
         ),
-        "shorezone_line": LayerSpec(
-            path=os.path.join(habitat_dir, "ShoreZone", "szline.shp"),
-            kind="line",
+        "shorezone_eelgrass": LayerSpec(
+            path=shorezone_gdb, layer="eelline", kind="line", columns="EELGRASS"
         ),
-        "shorezone_polygon": LayerSpec(
-            path=os.path.join(habitat_dir, "ShoreZone", "szpoly.shp"),
-            kind="polygon",
+        "shorezone_kelp": LayerSpec(
+            path=shorezone_gdb, layer="kelpline", kind="line", columns="ALLKELP"
+        ),
+        "shorezone_surfgrass": LayerSpec(
+            path=shorezone_gdb, layer="surfline", kind="line", columns="SURFGRASS"
+        ),
+        "shorezone_sargassum": LayerSpec(
+            path=shorezone_gdb, layer="sargline", kind="line", columns="SARGASSUM"
+        ),
+        "shorezone_saltmarsh": LayerSpec(
+            path=shorezone_gdb, layer="saltline", kind="line", columns="SALTMARSH"
+        ),
+        "shorezone_dunegrass": LayerSpec(
+            path=shorezone_gdb, layer="graline", kind="line", columns="DUNEGRASS"
+        ),
+        "shorezone_protection": LayerSpec(
+            path=shorezone_gdb, layer="expline", kind="line", columns="EXP_CLASS"
+        ),
+        "shorezone_shoreline": LayerSpec(
+            path=shorezone_gdb, layer="shorline", kind="line", columns="BC_NAME"
         ),
     }
 
@@ -263,7 +295,9 @@ for county in county_list:
         )
 
     missing = [
-        name for name, spec in HABITAT_LAYERS.items() if not os.path.exists(spec.path)
+        n
+        for n, s in HABITAT_LAYERS.items()
+        if not layer_spec_exists(s.path, s.layer)
     ]
     if missing:
         logging.getLogger("barriers_to_migration").warning(

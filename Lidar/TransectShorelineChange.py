@@ -16,9 +16,11 @@ Outputs, in PROFILE_ROOT / <region> / "shoreline" (read by PlotTransectProfiles.
                                       needed to draw the trend confidence band
   shoreline_positions_<datum>.gpkg    crossing points, one layer per scan
   shoreline_positions_polylines_<datum>.gpkg  crossing polylines, one layer per scan
-The rate points are also written to OUT_ROOT / <region> / OUT_NAME with two layers:
-  shoreline_change_<datum>            point features, one point per transect
-  shoreline_change_polylines_<datum>  polyline features, grouped by segment
+The rate points are written to OUT_ROOT / <region> / OUT_NAME, layer
+shoreline_change_<datum> (one point per transect), and as line segments to
+OUT_ROOT / <region> / shoreline_change_polylines_<datum>.shp: points are connected
+per path_id in sample_id order, with one segment per point (midpoint to midpoint)
+carrying that point's attributes.
 """
 
 import re
@@ -32,7 +34,7 @@ import pyogrio
 from scipy import stats
 from shapely.geometry import LineString
 
-PROFILE_ROOT = Path(r"D:\Data\Lidar\county_change")
+PROFILE_ROOT = Path(r"N:\SEA\Kai\Data\lidar\county_change")
 OUT_ROOT = Path(r"N:\SEA\Kai\Data\lidar\ShorelineChange")
 
 # Per-scan vertical accuracy (ft). "unavailable" or blank values fall back to
@@ -86,6 +88,14 @@ SLOPE_WINDOW_M = (
 YEAR_PATTERN = re.compile(r"(\d{4})")
 
 KEYS = ["path_id", "sample_id"]
+
+# Shapefile field names are limited to 10 characters.
+SHP_FIELD_NAMES = {
+    "ci95_lower_m_yr": "ci95_lo",
+    "ci95_upper_m_yr": "ci95_hi",
+    "fit_intercept": "fit_icept",
+    "fit_year_mean": "fit_ymean",
+}
 
 
 def scan_year(scan_name):
@@ -160,6 +170,19 @@ def load_bases(region):
         columns=KEYS + ["measure_m", col],
     )
     return bases.rename(columns={col: "datum_z"})
+
+
+def contiguous_runs(df):
+    """Sort by path_id/sample_id and label runs of consecutive sample_ids on a path.
+
+    Transects without a crossing or rate are missing from the data, so connecting
+    across a sample_id gap would draw a line over the unmeasured stretch.
+    """
+    df = df.sort_values(KEYS, ignore_index=True)
+    new = (df["path_id"] != df["path_id"].shift()) | (
+        df["sample_id"].diff() != 1
+    )
+    return df.assign(run_id=new.cumsum())
 
 
 def scan_crossings(path, levels):
@@ -445,20 +468,19 @@ def process_region(region, uncertainty, fallback):
             geometry=gpd.points_from_xy(c["x"], c["y"]),
             crs=crs,
         )
-        pyogrio.write_dataframe(points, paths["positions"], layer=scan, driver="GPKG")
+        pyogrio.write_dataframe(points, paths["positions"], layer=scan, driver="GPKG", dataset_options={"OVERWRITE": "YES"})
 
         # Create polyline version of the crossing positions
         polylines = []
-        for sample_id, group in c.groupby("sample_id", sort=False):
-            group = group.sort_values("path_id", ignore_index=True)
-
+        for _, group in contiguous_runs(c).groupby("run_id", sort=False):
             if len(group) < 2:
                 continue
 
-            coords = [(row["x"], row["y"]) for _, row in group.iterrows()]
+            coords = list(zip(group["x"], group["y"]))
             line_geom = LineString(coords)
 
-            line_attrs = group.iloc[0].drop(["x", "y"]).to_dict()
+            line_attrs = group.iloc[0].drop(["x", "y", "run_id"]).to_dict()
+            line_attrs["sample_id_end"] = group["sample_id"].iloc[-1]
             line_attrs["geometry"] = line_geom
             line_attrs["n_points"] = len(group)
 
@@ -467,7 +489,7 @@ def process_region(region, uncertainty, fallback):
         if polylines:
             polylines_gdf = gpd.GeoDataFrame(polylines, crs=crs)
             pyogrio.write_dataframe(
-                polylines_gdf, paths["positions_polylines"], layer=scan, driver="GPKG"
+                polylines_gdf, paths["positions_polylines"], layer=scan, driver="GPKG", dataset_options={"OVERWRITE": "YES"}
             )
 
     print(f"Wrote {crossings['scan'].nunique()} scan layers to {paths['positions']}")
@@ -482,42 +504,41 @@ def process_region(region, uncertainty, fallback):
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     layer = f"shoreline_change_{CROSSING_DATUM}"
-    pyogrio.write_dataframe(out, out_path, layer=layer, driver="GPKG")
+    pyogrio.write_dataframe(out, out_path, layer=layer, driver="GPKG", dataset_options={"OVERWRITE": "YES"})
     counts = out["change"].value_counts().to_dict()
     print(f"Wrote {len(out)} transects ({counts}) to {out_path} [{layer}]")
 
-    # Create polyline version of the output
-    # Group points by sample_id (segment) to maintain connectivity
-    polylines = []
-    for sample_id, group in out.groupby("sample_id", sort=False):
-        # Sort by path_id within each sample_id to maintain order
-        group = group.sort_values("path_id", ignore_index=True)
+    write_change_polylines(out, OUT_ROOT / region)
 
+
+def write_change_polylines(out, out_dir):
+    """Shapefile with one segment per rate point, carrying that point's attributes.
+
+    Points are connected per path_id in sample_id order; each segment runs from the
+    midpoint with the previous point, through the point, to the midpoint with the next.
+    """
+    segments = []
+    for _, group in contiguous_runs(out).groupby("run_id", sort=False):
         if len(group) < 2:
-            # Need at least 2 points to create a line
             continue
-
-        # Extract coordinates from the geometry column
-        coords = [(geom.x, geom.y) for geom in group.geometry]
-
-        line_geom = LineString(coords)
-
-        # Use the first row's attributes for the polyline
-        line_attrs = group.iloc[0].to_dict()
-        line_attrs["geometry"] = line_geom
-        line_attrs["n_points"] = len(group)
-
-        polylines.append(line_attrs)
-
-    if polylines:
-        polylines_gdf = gpd.GeoDataFrame(polylines, crs=out.crs)
-        polyline_layer = f"shoreline_change_polylines_{CROSSING_DATUM}"
-        pyogrio.write_dataframe(
-            polylines_gdf, out_path, layer=polyline_layer, driver="GPKG"
+        xy = np.column_stack([group.geometry.x, group.geometry.y])
+        mid = (xy[:-1] + xy[1:]) / 2
+        starts = np.vstack([xy[:1], mid])
+        ends = np.vstack([mid, xy[-1:]])
+        segments.append(
+            gpd.GeoDataFrame(
+                group.drop(columns=["geometry", "run_id"]),
+                geometry=[LineString(v) for v in zip(starts, xy, ends)],
+                crs=out.crs,
+            )
         )
-        print(
-            f"Wrote {len(polylines_gdf)} polyline segments to {out_path} [{polyline_layer}]"
-        )
+    if not segments:
+        return
+
+    lines = pd.concat(segments, ignore_index=True).rename(columns=SHP_FIELD_NAMES)
+    shp_path = out_dir / f"shoreline_change_polylines_{CROSSING_DATUM}.shp"
+    pyogrio.write_dataframe(lines, shp_path, driver="ESRI Shapefile")
+    print(f"Wrote {len(lines)} polyline segments to {shp_path}")
 
 
 #################### Main ######################

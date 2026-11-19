@@ -538,12 +538,6 @@ def process_region(region, uncertainty, fallback, tiles, pool):
             continue
         contours = result["contours"]
         if contours is not None and len(contours):
-            pyogrio.write_dataframe(
-                gpd.GeoDataFrame(contours, geometry="geometry", crs=OUTPUT_CRS),
-                paths["positions_polylines"],
-                layer=scan,
-                driver="GPKG",
-            )
             contours_all.append(contours)
         if result["crossings"] is not None and len(result["crossings"]):
             frames.append(result["crossings"])
@@ -562,16 +556,44 @@ def process_region(region, uncertainty, fallback, tiles, pool):
     rates.to_parquet(paths["rates"], index=False)
     print(f"Wrote {paths['crossings']} and {paths['rates']}")
 
+    # Write contour polylines to GPKG (each scan as a separate layer)
+    # This was originally done during worker processing but SQLite locking caused issues
+    # when multiple workers tried to write simultaneously, so we batch write here instead
+    if contours_all:
+        paths["positions_polylines"].unlink(missing_ok=True)
+        first_write = True
+        for contours in contours_all:
+            if len(contours):
+                scan = contours["scan"].iloc[0]
+                pyogrio.write_dataframe(
+                    gpd.GeoDataFrame(contours, geometry="geometry", crs=OUTPUT_CRS),
+                    paths["positions_polylines"],
+                    layer=scan,
+                    driver="GPKG",
+                    mode="a" if not first_write else "w",
+                    dataset_options={"OVERWRITE": "YES"} if first_write else {},
+                )
+                first_write = False
+        print(f"Wrote {len(contours_all)} scan layers to {paths['positions_polylines']}")
+
     paths["positions"].unlink(missing_ok=True)
+    first_write = True
     for scan, c in crossings.groupby("scan"):
         points = gpd.GeoDataFrame(
             c.drop(columns=["x", "y"]),
             geometry=gpd.points_from_xy(c["x"], c["y"]),
             crs=OUTPUT_CRS,
         )
-        pyogrio.write_dataframe(points, paths["positions"], layer=scan, driver="GPKG")
+        pyogrio.write_dataframe(
+            points,
+            paths["positions"],
+            layer=scan,
+            driver="GPKG",
+            mode="a" if not first_write else "w",
+            dataset_options={"OVERWRITE": "YES"} if first_write else {},
+        )
+        first_write = False
     print(f"Wrote {crossings['scan'].nunique()} scan layers to {paths['positions']}")
-    print(f"Wrote contours to {paths['positions_polylines']}")
 
     # Write all contours to a single shapefile
     if contours_all:
@@ -588,6 +610,7 @@ def process_region(region, uncertainty, fallback, tiles, pool):
             all_contours_gdf,
             str(paths["positions_polylines_shp"]),
             driver="ESRI Shapefile",
+            dataset_options={"OVERWRITE": "YES"},
         )
         print(f"Wrote {len(all_contours_gdf)} contour polylines to {paths['positions_polylines_shp']}")
 

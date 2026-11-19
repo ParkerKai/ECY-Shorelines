@@ -34,12 +34,12 @@ from part5_habitats import discover_wetland_layers, tag_habitat_intersections_an
 # ---------------------------
 
 county_list = [
-   "clallam",
-   "jefferson",
-   "grays_harbor",
-   "kitsap",
-   "pacific",
-   "wahkiakum",
+    #   "clallam",
+    #   "jefferson",
+    #   "grays_harbor",
+    #   "kitsap",
+    "pacific",
+    "wahkiakum",
 ]
 
 
@@ -295,9 +295,7 @@ for county in county_list:
         )
 
     missing = [
-        n
-        for n, s in HABITAT_LAYERS.items()
-        if not layer_spec_exists(s.path, s.layer)
+        n for n, s in HABITAT_LAYERS.items() if not layer_spec_exists(s.path, s.layer)
     ]
     if missing:
         logging.getLogger("barriers_to_migration").warning(

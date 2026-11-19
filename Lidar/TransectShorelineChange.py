@@ -462,13 +462,24 @@ def process_region(region, uncertainty, fallback):
     )["crs"]
     paths["positions"].unlink(missing_ok=True)
     paths["positions_polylines"].unlink(missing_ok=True)
+    
+    first_positions_write = True
+    first_polylines_write = True
     for scan, c in crossings.groupby("scan"):
         points = gpd.GeoDataFrame(
             c.drop(columns=["x", "y"]),
             geometry=gpd.points_from_xy(c["x"], c["y"]),
             crs=crs,
         )
-        pyogrio.write_dataframe(points, paths["positions"], layer=scan, driver="GPKG", dataset_options={"OVERWRITE": "YES"})
+        pyogrio.write_dataframe(
+            points,
+            paths["positions"],
+            layer=scan,
+            driver="GPKG",
+            mode="w" if first_positions_write else "a",
+            dataset_options={"OVERWRITE": "YES"} if first_positions_write else {},
+        )
+        first_positions_write = False
 
         # Create polyline version of the crossing positions
         polylines = []
@@ -489,8 +500,14 @@ def process_region(region, uncertainty, fallback):
         if polylines:
             polylines_gdf = gpd.GeoDataFrame(polylines, crs=crs)
             pyogrio.write_dataframe(
-                polylines_gdf, paths["positions_polylines"], layer=scan, driver="GPKG", dataset_options={"OVERWRITE": "YES"}
+                polylines_gdf,
+                paths["positions_polylines"],
+                layer=scan,
+                driver="GPKG",
+                mode="w" if first_polylines_write else "a",
+                dataset_options={"OVERWRITE": "YES"} if first_polylines_write else {},
             )
+            first_polylines_write = False
 
     print(f"Wrote {crossings['scan'].nunique()} scan layers to {paths['positions']}")
     print(
@@ -537,7 +554,12 @@ def write_change_polylines(out, out_dir):
 
     lines = pd.concat(segments, ignore_index=True).rename(columns=SHP_FIELD_NAMES)
     shp_path = out_dir / f"shoreline_change_polylines_{CROSSING_DATUM}.shp"
-    pyogrio.write_dataframe(lines, shp_path, driver="ESRI Shapefile")
+    pyogrio.write_dataframe(
+        lines,
+        shp_path,
+        driver="ESRI Shapefile",
+        dataset_options={"OVERWRITE": "YES"},
+    )
     print(f"Wrote {len(lines)} polyline segments to {shp_path}")
 
 

@@ -1,11 +1,30 @@
 """
 Created on 07/06/2026
 
-This script loads all Wave/WL datasets
-  Cosmos               : CM
+Create a point layer of extreme water levels from the combined Cosmos (CoSMoS)
+water level NetCDF files.
 
-It then calculates extremes.
-It then outputs the data a shapefile
+Workflow
+  1. Load each NetCDF file in dir_in (variable "waterlevel", dims time x station).
+  2. For every station, select a peaks-over-threshold (POT) threshold with the
+     ForwardStop procedure (threshold searched between the pct_low/pct_high
+     percentiles, constrained to exceed_per_year_min/max events per year),
+     decluster events 72 h apart, and estimate return levels for RPs both
+     empirically and by fitting a GPD
+     (POT_Extremes_XR.compute_return_intervals_forwardstop_map).
+  3. Optionally (EXPORT_EXTREME_DATASET) write the source data sampled at each
+     station's declustered events to Cosmos_Extremes_WL_Events.nc.
+  4. Write Cosmos_Extremes_WL.shp: one point per station in wide format.
+
+Shapefile columns (names limited to 10 characters)
+  RL_Emp_<RP>  : empirical return level for each return period (years)
+  RL_GPD_<RP>  : GPD-derived return level for each return period (years)
+  POT_thresh   : selected POT threshold
+  n_events     : number of declustered events above the threshold
+  events_yr    : declustered events per year
+  reason       : status code (0 = success; see reason_code attrs in the function)
+  threshflag   : bitmask of threshold-search diagnostics (0 = no issues)
+  station, lat, lon : station index and location (EPSG:4326)
 
 
 @author: kaparker
@@ -50,16 +69,21 @@ except ImportError as e:
 # ===============================================================================
 # User Inputs
 # ===============================================================================
-dir_in = r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\WLs\WaterLevels\WaterLevels_Combined_000"
-dir_out = r"N:\SEA\Kai\Data\SLR_Atlas"
+dir_in = r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\WLs\WaterLevels\WaterLevels_Combined_000"  # input *.nc files
+dir_out = r"N:\SEA\Kai\Data\SLR_Atlas\Cosmos_Extremes_WL"  # shapefile and events NetCDF are written here
 
-N_WORKERS = 8
+N_WORKERS = 8  # Dask worker processes (one thread each)
 
-RPs = np.array([1, 5, 10, 20, 50, 100])
-EXPORT_EXTREME_DATASET = True
+RPs = np.array([1, 5, 10, 20, 50, 100])  # return periods (years)
+EXPORT_EXTREME_DATASET = True  # also write the declustered-event NetCDF
 
 
 def _slice_at_extreme_indices(ds, extreme_indices_ds):
+    """Sample the source dataset at each station's declustered extreme times.
+
+    Returns a dataset with an "event" dimension (NaN where a station has fewer
+    events than the maximum) plus the POT threshold and event count per station.
+    """
     indices = extreme_indices_ds["extreme_time_index"]
     valid = indices >= 0
     selected = ds.isel(time=indices.where(valid, 0))
@@ -96,6 +120,7 @@ STATION_COLUMN_NAMES = {
 
 
 def _rp_label(rp):
+    """Return period as a column suffix, e.g. 100 -> '100', 2.5 -> '2p5'."""
     return f"{float(rp):g}".replace(".", "p")
 
 
@@ -133,6 +158,7 @@ def _to_wide_dataframe(ds):
 
 
 def main():
+    """Run the extremes analysis for every input file and write the outputs."""
     cluster = LocalCluster(
         processes=True,
         n_workers=N_WORKERS,

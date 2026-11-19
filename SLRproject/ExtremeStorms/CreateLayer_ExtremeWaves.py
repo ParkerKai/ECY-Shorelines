@@ -1,11 +1,32 @@
 """
 Created on 07/06/2026
 
-This script loads all Wave/WL datasets
-  Cosmos               : CM
+Create a point layer of extreme significant wave heights (Hs) from the
+Cosmos (CoSMoS) wave hindcast/projection NetCDF files.
 
-It then calculates extremes.
-It then outputs the data a shapefile
+Workflow
+  1. Load each NetCDF file in dir_in (variable "Hs", dims time x station).
+  2. For every station, select a peaks-over-threshold (POT) threshold with the
+     ForwardStop procedure (threshold searched between the pct_low/pct_high
+     percentiles, constrained to exceed_per_year_min/max events per year),
+     decluster events 72 h apart, and estimate return levels for RPs both
+     empirically and by fitting a GPD
+     (POT_Extremes_XR.compute_return_intervals_forwardstop_map).
+  3. Optionally (EXPORT_EXTREME_DATASET) write the source data sampled at each
+     station's declustered events to Cosmos_Extremes_Wave_Events.nc.
+  4. Write Cosmos_Extremes_Wave.shp: one point per station in wide format.
+
+Shapefile columns (names limited to 10 characters)
+  RL_Emp_<RP>  : empirical return level for each return period (years)
+  RL_GPD_<RP>  : GPD-derived return level for each return period (years)
+  POT_thresh   : selected POT threshold
+  n_events     : number of declustered events above the threshold
+  events_yr    : declustered events per year
+  reason       : status code (0 = success; see reason_code attrs in the function)
+  threshflag   : bitmask of threshold-search diagnostics (0 = no issues)
+  station, lat, lon : station index and location (EPSG:4326)
+
+Performance timings and Dask logs are written to the perf_logs folder in dir_out.
 
 
 @author: kaparker
@@ -31,9 +52,11 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 from glob import glob
 import sys
+from dask import compute as dask_compute
 from dask.distributed import Client, LocalCluster
 import geopandas as gpd
 
@@ -61,19 +84,20 @@ except ImportError as e:
 # User Inputs
 # ===============================================================================
 # dir_in = r"\\tsclient\N\SEA\Kai\Data\Cosmos\Waves\000"
-dir_in = r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\Waves\Waves\000"
-dir_out = r"C:\Users\kaip461\OneDrive - Washington State Executive Branch Agencies\Documents\Data\Waves\Cosmos_Extremes_Wave"
+dir_in = r"N:\SEA\Kai\Data\Cosmos\Waves\000"
+dir_out = r"N:\SEA\Kai\Data\SLR_Atlas\Cosmos_Extremes_Wave"
 
 # label describing this run configuration (VM vs local, network vs local drive, ...)
 PERF_DIR = os.path.join(dir_out, "perf_logs")
 N_WORKERS = 8
-RUN_TAG = f"vm_TempDrive_{N_WORKERS}workers"
+RUN_TAG = f"vm_Ndrive_{N_WORKERS}workers"
 LOG_FILE = os.path.join(
     PERF_DIR,
     f"dask_{RUN_TAG}_{datetime.now():%Y%m%d_%H%M%S}.log",
 )
 
 RPs = np.array([1, 5, 10, 25, 50, 100])
+EXPORT_EXTREME_DATASET = True
 
 
 # ===============================================================================
@@ -81,7 +105,88 @@ RPs = np.array([1, 5, 10, 25, 50, 100])
 # ===============================================================================
 
 
+def _slice_at_extreme_indices(ds, extreme_indices_ds):
+    """Sample the source dataset at each station's declustered extreme times.
+
+    Returns a dataset with an "event" dimension (NaN where a station has fewer
+    events than the maximum) plus the POT threshold and event count per station.
+    """
+    indices = extreme_indices_ds["extreme_time_index"]
+    valid = indices >= 0
+    selected = ds.isel(time=indices.where(valid, 0))
+
+    for name, variable in selected.variables.items():
+        if "station" in variable.dims and "event" in variable.dims:
+            selected[name] = variable.where(valid)
+
+    selected["pot_threshold"] = extreme_indices_ds["pot_threshold"]
+    selected["n_events"] = extreme_indices_ds["n_events"]
+    selected.attrs.update(extreme_indices_ds.attrs)
+    selected.attrs["event_selection"] = (
+        "Source dataset sampled at each station's declustered extreme time points"
+    )
+
+    # Clean up encoding attributes on time coordinate to avoid conflicts with CF encoding
+    # xarray will set these automatically during netCDF encoding
+    if "time" in selected.coords:
+        encoding_attrs = ["units", "calendar", "long_name"]
+        for attr in encoding_attrs:
+            if attr in selected["time"].attrs:
+                del selected["time"].attrs[attr]
+
+    return selected
+
+
+# Shapefile (DBF) field names are limited to 10 characters
+RL_COLUMN_PREFIXES = {
+    "return_level_emp": "RL_Emp",
+    "return_level_gpd": "RL_GPD",
+}
+STATION_COLUMN_NAMES = {
+    "threshold_flag": "threshflag",
+    "pot_threshold": "POT_thresh",
+    "events_per_year": "events_yr",
+    "reason_code": "reason",
+}
+
+
+def _rp_label(rp):
+    """Return period as a column suffix, e.g. 100 -> '100', 2.5 -> '2p5'."""
+    return f"{float(rp):g}".replace(".", "p")
+
+
+def _to_wide_dataframe(ds):
+    """One row per station, with a separate column per return period (e.g. RL_GPD_100)."""
+    station_df = (
+        ds.drop_dims("rp")
+        .to_dataframe()
+        .reset_index()
+        .rename(columns=STATION_COLUMN_NAMES)
+    )
+
+    rl_frames = []
+    for var, prefix in RL_COLUMN_PREFIXES.items():
+        rl = ds[var].transpose("station", "rp")
+        rl_frames.append(
+            pd.DataFrame(
+                rl.values,
+                columns=[f"{prefix}_{_rp_label(rp)}" for rp in rl["rp"].values],
+            )
+        )
+
+    wide_df = pd.concat([station_df] + rl_frames, axis=1)
+
+    long_names = [c for c in wide_df.columns if len(str(c)) > 10]
+    if long_names:
+        print(f"Warning: these column names will be truncated in the shapefile: {long_names}")
+
+    return wide_df
+
 def main(perf):
+    """Run the extremes analysis for every input file and write the outputs.
+
+    perf is a PerfTracker used to time each stage.
+    """
     os.makedirs(PERF_DIR, exist_ok=True)
     logging.basicConfig(
         filename=LOG_FILE,
@@ -112,6 +217,7 @@ def main(perf):
         files = glob(os.path.join(dir_in, "*.nc"))
 
     save = []
+    save_extreme_datasets = []
     for i, file in enumerate(files):
         print(f"Processing file: {file}")
 
@@ -123,20 +229,35 @@ def main(perf):
                 lon = ds["lon"].load()
 
             with perf.stage(f"compute_file_{i:03d}"):
-                results = compute_return_intervals_forwardstop_map(
+                computed = compute_return_intervals_forwardstop_map(
                     da,
                     RPs=RPs,
                     r="72h",
-                    l=10,
+                    l=30,
                     method="both",
                     fitter_method="mle",
-                    n_boot=25,
+                    n_boot=300,
+                    pct_low=97.5,
+                    pct_high=99.95,
+                    exceed_per_year_min=1,
+                    exceed_per_year_max=10,
+                    return_extremes=EXPORT_EXTREME_DATASET,
                 )
+                if EXPORT_EXTREME_DATASET:
+                    results, extreme_indices = computed
+                else:
+                    results = computed
                 results["lat"] = lat
                 results["lon"] = lon
-                results = results.compute()
+                if EXPORT_EXTREME_DATASET:
+                    results, extreme_indices = dask_compute(results, extreme_indices)
+                    extreme_ds = _slice_at_extreme_indices(ds, extreme_indices).load()
+                else:
+                    results = results.compute()
 
         save.append(results)
+        if EXPORT_EXTREME_DATASET:
+            save_extreme_datasets.append(extreme_ds)
 
         # st = 19  # pick a station index
         # series_i = ds["waterlevel"].isel(station=st).chunk({"time": -1})
@@ -157,6 +278,8 @@ def main(perf):
 
     with perf.stage("concat"):
         final_ds = xr.concat(save, dim="station")
+        if EXPORT_EXTREME_DATASET:
+            final_extreme_ds = xr.concat(save_extreme_datasets, dim="station")
 
     with perf.stage("compute_extremes"):
         try:
@@ -174,15 +297,24 @@ def main(perf):
                 logger.exception("Could not collect Dask worker logs after failure")
             raise
 
+    if EXPORT_EXTREME_DATASET:
+        with perf.stage("write_extreme_dataset_netcdf"):
+            final_extreme_ds.to_netcdf(
+                os.path.join(dir_out, "Cosmos_Extremes_Wave_Events.nc"),
+                engine="h5netcdf",
+            )
+
     # ===============================================================================
     # Turn a subset into a geodataframe
     # ===============================================================================
 
     # Build GeoDataFrame from final_ds (point geometry from lon/lat)
     with perf.stage("build_geodataframe"):
+        final_df = _to_wide_dataframe(final_ds)
+
         gdf = gpd.GeoDataFrame(
-            final_ds.to_dataframe().reset_index(),  # or select a subset of columns
-            geometry=gpd.points_from_xy(final_ds["lon"].values, final_ds["lat"].values),
+            final_df,  # or select a subset of columns
+            geometry=gpd.points_from_xy(final_df["lon"].values, final_df["lat"].values),
             crs="EPSG:4326",
         )
 

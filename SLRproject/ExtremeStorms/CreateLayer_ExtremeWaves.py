@@ -84,7 +84,7 @@ except ImportError as e:
 # User Inputs
 # ===============================================================================
 # dir_in = r"\\tsclient\N\SEA\Kai\Data\Cosmos\Waves\000"
-dir_in = r"N:\SEA\Kai\Data\Cosmos\Waves\000"
+dir_in = r"D:\Data\Waves\Cosmos\000"
 dir_out = r"N:\SEA\Kai\Data\SLR_Atlas\Cosmos_Extremes_Wave"
 
 # label describing this run configuration (VM vs local, network vs local drive, ...)
@@ -96,7 +96,7 @@ LOG_FILE = os.path.join(
     f"dask_{RUN_TAG}_{datetime.now():%Y%m%d_%H%M%S}.log",
 )
 
-RPs = np.array([1, 5, 10, 25, 50, 100])
+RPs = np.array([1, 5, 10, 20, 50, 100])
 EXPORT_EXTREME_DATASET = True
 
 
@@ -178,9 +178,12 @@ def _to_wide_dataframe(ds):
 
     long_names = [c for c in wide_df.columns if len(str(c)) > 10]
     if long_names:
-        print(f"Warning: these column names will be truncated in the shapefile: {long_names}")
+        print(
+            f"Warning: these column names will be truncated in the shapefile: {long_names}"
+        )
 
     return wide_df
+
 
 def main(perf):
     """Run the extremes analysis for every input file and write the outputs.

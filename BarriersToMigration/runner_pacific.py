@@ -38,7 +38,7 @@ county_list = [
     #   "jefferson",
     #   "grays_harbor",
     #   "kitsap",
-    "pacific",
+    #"pacific",
     "wahkiakum",
 ]
 
@@ -149,7 +149,7 @@ for county in county_list:
     transects = generate_transects(
         county_layers=county_layers,
         config=cfg,
-        dem_path=os.path.join(r"N:\SEA\Kai\Data\DEM_ByCounty", f"{county}_dem"),
+        dem_path=os.path.join(r"N:\SEA\Kai\Data\DEM\DEM_ByCounty", f"{county}_dem"),
         dem_source_crs="EPSG:2927",
         out_dir=out_dir,
         county_name=county,

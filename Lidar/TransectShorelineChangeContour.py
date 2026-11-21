@@ -25,7 +25,7 @@ the transects:
 Scans are processed in parallel (N_WORKERS processes). Run from a terminal, not
 an interactive kernel, so the worker processes can import this module.
 
-Outputs, in PROFILE_ROOT / <region> / "shoreline":
+Outputs, in OUT_ROOT / <region> / "shoreline":
   crossings_<datum>.parquet                   one row per transect x scan
   rates_<datum>.parquet                       one row per transect
   shoreline_positions_<datum>.gpkg            crossing points, one layer per scan
@@ -69,8 +69,7 @@ from TransectShorelineChange import (
 
 gdal.UseExceptions()
 
-PROFILE_ROOT = Path(r"N:\SEA\Kai\Data\lidar\county_change_contour")
-OUT_ROOT = Path(r"N:\SEA\Kai\Data\lidar\ShorelineChange_contour")
+OUT_ROOT = Path(r"D:\Data\Lidar_CoastalChange\ShorelineChange_contour")
 OUT_NAME = "shoreline_change.gpkg"
 
 INDEX_GPKG = Path(r"D:\Data\Lidar\lidar_tile_index_dtm.gpkg")
@@ -89,7 +88,7 @@ KEEP_DEMS = False
 N_WORKERS = 5
 
 # Contour pieces shorter than this (m) are dropped: rings around rocks, logs, puddles.
-MIN_CONTOUR_LEN_M = 10.0
+MIN_CONTOUR_LEN_M = 100.0
 
 # Elevations outside this range (m) are undeclared nodata sentinels.
 VALID_Z_RANGE = (-200.0, 5000.0)
@@ -106,7 +105,7 @@ CHUNK = 4096
 
 
 def shoreline_paths(region, datum=CROSSING_DATUM):
-    out_dir = PROFILE_ROOT / region / "shoreline"
+    out_dir = OUT_ROOT / region / "shoreline"
     return {
         "crossings": out_dir / f"crossings_{datum}.parquet",
         "rates": out_dir / f"rates_{datum}.parquet",
@@ -433,6 +432,13 @@ def process_scan(job):
             shutil.rmtree(work, ignore_errors=True)
 
 
+def remove_gpkg(path):
+    """Delete a GPKG and its SQLite sidecars; stale -wal/-shm files make a
+    recreated file read-only."""
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        Path(str(path) + suffix).unlink(missing_ok=True)
+
+
 #################### Per-region driver ######################
 
 
@@ -525,7 +531,7 @@ def process_region(region, uncertainty, fallback, tiles, pool):
     if not jobs:
         return
 
-    paths["positions_polylines"].unlink(missing_ok=True)
+    remove_gpkg(paths["positions_polylines"])
     contours_all = []
     frames = []
     futures = {pool.submit(process_scan, job): job["scan"] for job in jobs}
@@ -560,7 +566,7 @@ def process_region(region, uncertainty, fallback, tiles, pool):
     # This was originally done during worker processing but SQLite locking caused issues
     # when multiple workers tried to write simultaneously, so we batch write here instead
     if contours_all:
-        paths["positions_polylines"].unlink(missing_ok=True)
+        remove_gpkg(paths["positions_polylines"])
         first_write = True
         for contours in contours_all:
             if len(contours):
@@ -570,13 +576,12 @@ def process_region(region, uncertainty, fallback, tiles, pool):
                     paths["positions_polylines"],
                     layer=scan,
                     driver="GPKG",
-                    mode="a" if not first_write else "w",
-                    dataset_options={"OVERWRITE": "YES"} if first_write else {},
+                    append=not first_write,
                 )
                 first_write = False
         print(f"Wrote {len(contours_all)} scan layers to {paths['positions_polylines']}")
 
-    paths["positions"].unlink(missing_ok=True)
+    remove_gpkg(paths["positions"])
     first_write = True
     for scan, c in crossings.groupby("scan"):
         points = gpd.GeoDataFrame(
@@ -589,8 +594,7 @@ def process_region(region, uncertainty, fallback, tiles, pool):
             paths["positions"],
             layer=scan,
             driver="GPKG",
-            mode="a" if not first_write else "w",
-            dataset_options={"OVERWRITE": "YES"} if first_write else {},
+            append=not first_write,
         )
         first_write = False
     print(f"Wrote {crossings['scan'].nunique()} scan layers to {paths['positions']}")
